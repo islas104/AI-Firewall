@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t ai-firewall:ci .
+      - name: Smoke test container
+        run: |
+          docker network create ci-net
+          docker run -d --name redis --network ci-net redis:7-alpine
+          docker run -d --name proxy --network ci-net -p 3000:3000 \
+            -e REDIS_URL=redis://redis:6379 -e MOCK_UPSTREAM=true ai-firewall:ci
+          sleep 3
+          curl -sf http://localhost:3000/healthz
+          curl -sf -X POST http://localhost:3000/v1/chat/completions \
+            -H "Content-Type: application/json" -H "X-Agent-ID: ci-smoke" \
+            -d '{"model":"gpt-4o-mini","max_tokens":10,"messages":[{"role":"user","content":"ping"}]}' \
+            | grep -q '"usage"'

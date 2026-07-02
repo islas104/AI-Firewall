@@ -10,8 +10,13 @@ import OpenAI from 'openai';
 // Real upstream
 // ---------------------------------------------------------------------------
 
-export function createOpenAIUpstream({ apiKey, baseURL }) {
-  const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
+export function createOpenAIUpstream({ apiKey, baseURL, timeoutMs = 60_000, maxRetries = 1 }) {
+  const client = new OpenAI({
+    apiKey,
+    timeout: timeoutMs,
+    maxRetries,
+    ...(baseURL ? { baseURL } : {}),
+  });
   return {
     name: 'openai',
     chat: (payload) => client.chat.completions.create({ ...payload, stream: false }),
@@ -21,7 +26,7 @@ export function createOpenAIUpstream({ apiKey, baseURL }) {
       client.chat.completions.create({
         ...payload,
         stream: true,
-        stream_options: { ...(payload.stream_options ?? {}), include_usage: true },
+        stream_options: { ...payload.stream_options, include_usage: true },
       }),
   };
 }
@@ -100,5 +105,10 @@ export function createMockUpstream() {
 export function createUpstream(config) {
   return config.mockUpstream
     ? createMockUpstream()
-    : createOpenAIUpstream({ apiKey: config.openaiApiKey, baseURL: config.openaiBaseUrl });
+    : createOpenAIUpstream({
+        apiKey: config.openaiApiKey,
+        baseURL: config.openaiBaseUrl,
+        timeoutMs: config.upstreamTimeoutMs,
+        maxRetries: config.upstreamMaxRetries,
+      });
 }

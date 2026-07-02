@@ -39,7 +39,18 @@ from running up an unbounded bill.
   in-flight reservations; set limits and reset spend from the UI.
 - **Mock upstream mode** — run the entire product (budgets, streaming,
   kill-switch, dashboard) with zero OpenAI spend. Used by the test suite.
-- **Optional auth** — Bearer key for the proxy surface, separate admin key.
+- **Optional auth** — Bearer key for the proxy surface, separate admin key,
+  constant-time comparison.
+- **Request rate limiting** — per-agent requests/minute brake (Redis fixed
+  window), separate from the dollar ceiling.
+- **Observability** — structured JSON logs (pino) with request-ID correlation
+  and secret redaction, plus a Prometheus `/metrics` endpoint (latency
+  histograms, spend/halt/rate-limit counters).
+- **Security hardening** — strict CSP (no inline script), security headers,
+  agent-ID input validation, timing-safe auth, non-root container.
+- **Production reliability** — upstream timeouts and retries, graceful
+  connection draining on SIGTERM, fail-fast process error handlers,
+  Redis reconnect backoff, CI pipeline (tests + Docker smoke test).
 
 ## Quick start (60 seconds, no OpenAI key needed)
 
@@ -134,7 +145,9 @@ Responses include `X-Budget-Cost-USD`, `X-Budget-Spent-USD`,
 | Status | Meaning                                                        |
 | ------ | -------------------------------------------------------------- |
 | `402`  | Daily budget exceeded — agent halted. Body: `{"error": "Budget exceeded. Agent execution halted."}` |
-| `429`  | Remaining budget reserved by concurrent in-flight requests — retry. |
+| `429`  | `budget_contention` (in-flight reservations hold the remaining budget) or `rate_limited` (requests/minute exceeded) — both retryable, see `Retry-After`. |
+| `400`  | Invalid request: missing/invalid `X-Agent-ID`, empty `messages`, bad JSON. |
+| `413`  | Body exceeds the 2 MB limit.                                   |
 | `503`  | Budget store unreachable — fail closed.                        |
 
 ### Admin surface (`X-Admin-Key` if `ADMIN_API_KEY` set)
@@ -148,10 +161,11 @@ Responses include `X-Budget-Cost-USD`, `X-Budget-Spent-USD`,
 
 ### Other
 
-| Method | Path         | Purpose                                  |
-| ------ | ------------ | ---------------------------------------- |
-| `GET`  | `/healthz`   | Liveness (verifies Redis).               |
-| `GET`  | `/dashboard` | Live control-room UI.                    |
+| Method | Path         | Purpose                                              |
+| ------ | ------------ | ---------------------------------------------------- |
+| `GET`  | `/healthz`   | Liveness (verifies Redis).                           |
+| `GET`  | `/dashboard` | Live control-room UI.                                |
+| `GET`  | `/metrics`   | Prometheus metrics (behind `X-Admin-Key` when set).  |
 
 ## Pointing your agent at the proxy
 
@@ -185,6 +199,12 @@ A `402` surfaces as an SDK error your agent loop can catch and halt on.
 | `PORT`                        | `3000`                   | Listen port.                                       |
 | `OPENAI_BASE_URL`             | OpenAI default           | Alternate upstream (Azure, gateway).               |
 | `MODEL_PRICING`               | built-in table           | JSON of `{model: {input, output}}` USD per 1k tokens. |
+| `RATE_LIMIT_RPM`              | `60`                     | Requests/minute per agent (0 disables).            |
+| `UPSTREAM_TIMEOUT_MS`         | `60000`                  | OpenAI request timeout.                            |
+| `UPSTREAM_MAX_RETRIES`        | `1`                      | OpenAI SDK retry count.                            |
+| `LOG_LEVEL`                   | `info`                   | pino level (`debug`…`silent`).                     |
+| `TRUST_PROXY`                 | `0`                      | Trusted reverse-proxy hops for client IPs.         |
+| `ENABLE_HSTS`                 | `false`                  | Send HSTS (only behind TLS).                       |
 
 Built-in rates (USD / 1k tokens): `gpt-4o-mini` 0.0015 / 0.002 ·
 `gpt-4o` 0.005 / 0.015 · `gpt-4-turbo` 0.01 / 0.03 · fallback = gpt-4o-mini.
@@ -197,9 +217,29 @@ docker compose up -d redis   # integration tests need Redis (uses DB 15)
 npm test
 ```
 
-20 tests: pricing math (unit) plus full-stack integration — metering,
+27 tests: pricing math (unit), full-stack integration — metering,
 kill-switch, reservation guard, a 40-request concurrent burst proving the
-ceiling holds, streaming metering, admin flows, auth, malformed input.
+ceiling holds, streaming metering, admin flows, auth, malformed input — and
+production hardening: security headers, agent-ID validation, per-agent rate
+limiting, metrics endpoint, oversized-body handling.
+
+CI (GitHub Actions) runs the suite against a Redis service container, then
+builds the Docker image and smoke-tests it end-to-end.
+
+## Going live checklist
+
+- [ ] `PROXY_API_KEY` and `ADMIN_API_KEY` set (long random strings)
+- [ ] `MOCK_UPSTREAM=false`, real `OPENAI_API_KEY` provided via a secret
+      manager — never committed
+- [ ] TLS terminated in front of the proxy; `ENABLE_HSTS=true`,
+      `TRUST_PROXY=<hops>`
+- [ ] Redis persistent (AOF is on in compose), not exposed publicly
+      (compose binds it to loopback), password/TLS via `REDIS_URL` if remote
+- [ ] Prometheus scraping `/metrics` with the admin key; alert on
+      `budget_halts_total` spikes and `upstream_errors_total`
+- [ ] Log shipping for pino JSON output (request IDs correlate entries)
+- [ ] `HARD_DAILY_LIMIT_USD` and `RATE_LIMIT_RPM` sized for your fleet
+- [ ] Verify current OpenAI pricing against `MODEL_PRICING`
 
 ## Project structure
 
@@ -207,22 +247,28 @@ ceiling holds, streaming metering, admin flows, auth, malformed input.
 .
 ├── server.js                 # Entrypoint: assembles config → redis → app
 ├── src/
-│   ├── app.js                # Express wiring, auth layers, error handling
-│   ├── config.js             # Env config, frozen at boot
+│   ├── app.js                # Express wiring, middleware order, error handling
+│   ├── config.js             # Env config, frozen + validated at boot
 │   ├── pricing.js            # Pure cost math (unit-tested)
-│   ├── redis.js              # Client + Lua reserve/commit scripts
+│   ├── redis.js              # Client + Lua reserve/commit scripts, backoff
 │   ├── budget.js             # Budget domain: keys, lifecycle, fleet registry
-│   ├── upstream.js           # OpenAI client + deterministic mock
+│   ├── upstream.js           # OpenAI client (timeout/retries) + mock
+│   ├── logger.js             # pino structured logs, request IDs, redaction
+│   ├── metrics.js            # Prometheus registry + timing middleware
 │   ├── errors.js             # OpenAI-style error envelope
-│   ├── middleware/auth.js    # Proxy + admin auth
+│   ├── middleware/
+│   │   ├── auth.js           # Proxy + admin auth (timing-safe)
+│   │   ├── security.js       # CSP + security headers
+│   │   └── rateLimit.js      # Per-agent requests/minute (Redis)
 │   └── routes/
 │       ├── chat.js           # The proxy: reserve → forward → commit, SSE
 │       ├── admin.js          # Fleet, limits, resets
 │       └── health.js         # /healthz
-├── public/dashboard.html     # Live control-room UI
-├── test/                     # node:test suite (unit + integration)
+├── public/                   # Dashboard (CSP-safe external JS)
+├── test/                     # node:test suite (unit + integration + prod)
+├── .github/workflows/ci.yml  # Tests w/ Redis service + Docker smoke test
 ├── Dockerfile                # node:22-alpine, non-root, healthcheck
-└── docker-compose.yml        # redis + proxy
+└── docker-compose.yml        # redis (loopback-only) + proxy, restart policies
 ```
 
 ## License

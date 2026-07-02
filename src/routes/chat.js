@@ -18,16 +18,31 @@ import { errorBody } from '../errors.js';
 
 const HALT_BODY = { error: 'Budget exceeded. Agent execution halted.' };
 
-export function chatRouter({ config, budget, upstream }) {
+// Agent ids become Redis key segments and metric log fields — constrain them
+// to a safe alphabet and bounded length at the boundary.
+const AGENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+export function chatRouter({ config, budget, upstream, metrics }) {
   const router = Router();
 
   router.post('/v1/chat/completions', async (req, res) => {
+    const log = req.log ?? console;
     const agentId = req.header('X-Agent-ID');
     const payload = req.body ?? {};
 
     // --- Validation at the boundary ----------------------------------------
     if (!agentId) {
       return res.status(400).json(errorBody('Missing required header: X-Agent-ID.', 'missing_agent_id'));
+    }
+    if (!AGENT_ID_RE.test(agentId)) {
+      return res
+        .status(400)
+        .json(
+          errorBody(
+            'Invalid X-Agent-ID: use 1-64 characters from [A-Za-z0-9._-], starting alphanumeric.',
+            'invalid_agent_id',
+          ),
+        );
     }
     if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
       return res
@@ -43,7 +58,7 @@ export function chatRouter({ config, budget, upstream }) {
     try {
       reservation = await budget.reserve(agentId, estimate);
     } catch (err) {
-      console.error('[budget] reserve failed:', err.message);
+      log.error(`[budget] reserve failed: ${err.message}`);
       // Fail closed: if we can't verify the budget, we don't spend money.
       return res
         .status(503)
@@ -51,7 +66,8 @@ export function chatRouter({ config, budget, upstream }) {
     }
 
     if (reservation.status === 'halt') {
-      console.warn(
+      metrics?.budgetHalts.inc();
+      log.warn(
         `[halt] agent=${agentId} spent=$${reservation.spent.toFixed(4)} >= limit=$${reservation.limit}`,
       );
       return res.status(402).json(HALT_BODY);
@@ -60,6 +76,7 @@ export function chatRouter({ config, budget, upstream }) {
       // Committed spend is still under the limit, but in-flight requests have
       // reserved the remainder. 429 (not 402): the caller may retry after
       // those requests settle.
+      metrics?.budgetContention.inc();
       res.set('Retry-After', '5');
       return res
         .status(429)
@@ -73,22 +90,21 @@ export function chatRouter({ config, budget, upstream }) {
 
     const release = async (actualCost) => {
       try {
-        return await budget.commit(agentId, actualCost, estimate);
+        const total = await budget.commit(agentId, actualCost, estimate);
+        if (actualCost > 0) metrics?.spendUsd.inc(actualCost);
+        return total;
       } catch (err) {
         // The API call already happened and cost real money. Log loudly so
         // the discrepancy is visible; never fail the response over metering.
-        console.error(
-          `[budget] FAILED to commit cost=$${actualCost} agent=${agentId} — spend under-counted:`,
-          err.message,
+        log.error(
+          `[budget] FAILED to commit cost=$${actualCost} agent=${agentId} — spend under-counted: ${err.message}`,
         );
         return reservation.spent + actualCost;
       }
     };
 
-    const limit = reservation.limit;
-    return payload.stream
-      ? handleStream({ req, res, config, upstream, release, agentId, model, payload, estimate, limit })
-      : handleBlocking({ res, config, upstream, release, agentId, model, payload, limit });
+    const ctx = { req, res, config, upstream, release, agentId, model, payload, estimate, limit: reservation.limit, metrics, log };
+    return payload.stream ? handleStream(ctx) : handleBlocking(ctx);
   });
 
   return router;
@@ -98,15 +114,16 @@ export function chatRouter({ config, budget, upstream }) {
 // Non-streaming path
 // ---------------------------------------------------------------------------
 
-async function handleBlocking({ res, config, upstream, release, agentId, model, payload, limit }) {
+async function handleBlocking({ res, config, upstream, release, agentId, model, payload, limit, metrics, log }) {
   let completion;
   try {
     completion = await upstream.chat(payload);
   } catch (err) {
     await release(0); // pure release — nothing was spent... that we know of
+    metrics?.upstreamErrors.inc();
     const status = err?.status ?? 502;
     const message = err?.error?.message ?? err?.message ?? 'Upstream request failed.';
-    console.error(`[upstream] agent=${agentId} status=${status} message=${message}`);
+    log.error(`[upstream] agent=${agentId} status=${status} message=${message}`);
     return res.status(status).json(errorBody(message, 'upstream_error'));
   }
 
@@ -114,7 +131,7 @@ async function handleBlocking({ res, config, upstream, release, agentId, model, 
   const cost = computeCost(config.pricing, model, usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0);
   const newTotal = await release(cost);
 
-  logMeter({ agentId, model, usage, cost, newTotal, limit });
+  logMeter(log, { agentId, model, usage, cost, newTotal, limit });
   setBudgetHeaders(res, cost, newTotal, limit);
   return res.status(200).json(completion);
 }
@@ -123,15 +140,16 @@ async function handleBlocking({ res, config, upstream, release, agentId, model, 
 // Streaming path (SSE passthrough with usage capture)
 // ---------------------------------------------------------------------------
 
-async function handleStream({ req, res, config, upstream, release, agentId, model, payload, estimate, limit }) {
+async function handleStream({ req, res, config, upstream, release, agentId, model, payload, estimate, limit, metrics, log }) {
   let stream;
   try {
     stream = await upstream.chatStream(payload);
   } catch (err) {
     await release(0);
+    metrics?.upstreamErrors.inc();
     const status = err?.status ?? 502;
     const message = err?.error?.message ?? err?.message ?? 'Upstream request failed.';
-    console.error(`[upstream] agent=${agentId} status=${status} message=${message}`);
+    log.error(`[upstream] agent=${agentId} status=${status} message=${message}`);
     return res.status(status).json(errorBody(message, 'upstream_error'));
   }
 
@@ -157,7 +175,7 @@ async function handleStream({ req, res, config, upstream, release, agentId, mode
     }
     res.write('data: [DONE]\n\n');
   } catch (err) {
-    console.error(`[stream] agent=${agentId} aborted: ${err.message}`);
+    log.error(`[stream] agent=${agentId} aborted: ${err.message}`);
   } finally {
     // Meter from real usage when present; if the stream died before the
     // usage chunk, charge a conservative estimate from what actually flowed.
@@ -165,7 +183,14 @@ async function handleStream({ req, res, config, upstream, release, agentId, mode
       ? computeCost(config.pricing, model, usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0)
       : Math.min(estimate, computeCost(config.pricing, model, 0, Math.ceil(streamedChars / 4)));
     const newTotal = await release(cost);
-    logMeter({ agentId, model, usage: usage ?? { prompt_tokens: '?', completion_tokens: `~${Math.ceil(streamedChars / 4)}` }, cost, newTotal, limit });
+    logMeter(log, {
+      agentId,
+      model,
+      usage: usage ?? { prompt_tokens: '?', completion_tokens: `~${Math.ceil(streamedChars / 4)}` },
+      cost,
+      newTotal,
+      limit,
+    });
     res.end();
   }
 }
@@ -182,9 +207,10 @@ function setBudgetHeaders(res, cost, newTotal, limit) {
   }
 }
 
-function logMeter({ agentId, model, usage, cost, newTotal, limit }) {
-  console.log(
+function logMeter(log, { agentId, model, usage, cost, newTotal, limit }) {
+  const limitSuffix = limit ? '/' + limit : '';
+  log.info(
     `[meter] agent=${agentId} model=${model} in=${usage.prompt_tokens} out=${usage.completion_tokens} ` +
-      `cost=$${roundUsd(cost).toFixed(6)} total=$${roundUsd(newTotal).toFixed(4)}${limit ? `/${limit}` : ''}`,
+      `cost=$${roundUsd(cost).toFixed(6)} total=$${roundUsd(newTotal).toFixed(4)}${limitSuffix}`,
   );
 }

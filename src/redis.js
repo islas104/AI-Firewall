@@ -52,6 +52,10 @@ export function createRedis(redisUrl) {
     // Keep failures loud and bounded rather than silently queueing forever.
     maxRetriesPerRequest: 2,
     lazyConnect: false,
+    // Reconnect with capped exponential backoff instead of hammering a
+    // recovering Redis. Requests during the outage fail fast (fail-closed
+    // budget semantics) rather than queueing.
+    retryStrategy: (attempt) => Math.min(attempt * 200, 5000),
   });
 
   redis.defineCommand('reserveBudget', { numberOfKeys: 2, lua: RESERVE_LUA });

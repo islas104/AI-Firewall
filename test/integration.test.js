@@ -18,7 +18,7 @@ const RUN = `t${process.pid}`;
 const agent = (name) => `${RUN}-${name}`;
 
 const config = {
-  hardDailyLimitUsd: 1.0,
+  hardDailyLimitUsd: 1,
   pricing: loadPricing(),
   defaultCompletionEstimate: 100,
   spentKeyTtlSeconds: 300,
@@ -26,6 +26,8 @@ const config = {
   proxyApiKey: '',
   adminApiKey: '',
   mockUpstream: true,
+  rateLimitRpm: 0, // velocity limiting off — the burst test needs raw concurrency
+  logLevel: 'silent',
 };
 
 let redis, server, base, redisUp = true;
@@ -141,7 +143,7 @@ test('concurrent burst can never overshoot the ceiling', async (t) => {
 
   const status = await (await fetch(`${base}/v1/budget/${id}`)).json();
   assert.ok(
-    status.spentUsd <= 1.0 + 1e-9,
+    status.spentUsd <= 1 + 1e-9,
     `committed spend ($${status.spentUsd}) must never exceed the $1 ceiling`,
   );
 });

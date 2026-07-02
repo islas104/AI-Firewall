@@ -2,9 +2,10 @@ services:
   redis:
     image: redis:7-alpine
     container_name: budget-redis
+    restart: unless-stopped
     ports:
-      - "6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
+      - "127.0.0.1:6379:6379" # loopback only — not exposed to the network
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
     volumes:
       - redis-data:/data
     healthcheck:
@@ -16,6 +17,7 @@ services:
   proxy:
     build: .
     container_name: budget-proxy
+    restart: unless-stopped
     depends_on:
       redis:
         condition: service_healthy
@@ -24,11 +26,19 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       HARD_DAILY_LIMIT_USD: ${HARD_DAILY_LIMIT_USD:-10.00}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-60}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # Flip to "false" (and set OPENAI_API_KEY) for real traffic.
       MOCK_UPSTREAM: ${MOCK_UPSTREAM:-true}
       PROXY_API_KEY: ${PROXY_API_KEY:-}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+      ENABLE_HSTS: ${ENABLE_HSTS:-false}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
 volumes:
   redis-data:
