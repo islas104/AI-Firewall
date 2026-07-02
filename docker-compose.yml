@@ -1,0 +1,34 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: budget-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  proxy:
+    build: .
+    container_name: budget-proxy
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      REDIS_URL: redis://redis:6379
+      HARD_DAILY_LIMIT_USD: ${HARD_DAILY_LIMIT_USD:-10.00}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Flip to "false" (and set OPENAI_API_KEY) for real traffic.
+      MOCK_UPSTREAM: ${MOCK_UPSTREAM:-true}
+      PROXY_API_KEY: ${PROXY_API_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+
+volumes:
+  redis-data:

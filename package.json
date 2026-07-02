@@ -1,0 +1,33 @@
+{
+  "name": "ai-agent-budget-proxy",
+  "version": "2.0.0",
+  "description": "Budget-enforcing proxy between AI agents and the OpenAI API — atomic Redis spend tracking, per-agent limits, streaming metering, kill-switch, and a live dashboard.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "demo": "MOCK_UPSTREAM=true node server.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "keywords": [
+    "openai",
+    "proxy",
+    "budget",
+    "rate-limit",
+    "redis",
+    "ai-agent",
+    "cost-control",
+    "kill-switch"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ioredis": "^5.4.1",
+    "openai": "^4.67.3"
+  }
+}
