@@ -58,15 +58,29 @@ export function createMetrics() {
     registers: [registry],
   });
 
+  const globalBudgetHalts = new client.Counter({
+    name: 'global_budget_halts_total',
+    help: 'Requests rejected because the fleet-wide daily budget is exhausted',
+    registers: [registry],
+  });
+
+  const authFailures = new client.Counter({
+    name: 'auth_failures_total',
+    help: 'Failed authentication attempts (proxy + admin surfaces)',
+    registers: [registry],
+  });
+
   return {
     registry,
     httpRequests,
     httpDuration,
     spendUsd,
     budgetHalts,
+    globalBudgetHalts,
     budgetContention,
     rateLimited,
     upstreamErrors,
+    authFailures,
   };
 }
 

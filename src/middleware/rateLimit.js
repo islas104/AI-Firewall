@@ -11,27 +11,23 @@
  */
 import { errorBody } from '../errors.js';
 
-export function agentRateLimit({ config, redis, metrics }) {
-  if (!config.rateLimitRpm) {
-    return (_req, _res, next) => next();
-  }
-
+function fixedWindowLimiter({ redis, metrics, limitRpm, keyFor, label }) {
   return async (req, res, next) => {
-    const agentId = req.header('X-Agent-ID');
-    if (!agentId) return next(); // the chat route rejects missing ids with 400
+    const subject = keyFor(req);
+    if (!subject) return next();
 
     const minute = Math.floor(Date.now() / 60000);
-    const key = `agent:ratelimit:${agentId}:${minute}`;
+    const key = `${label}:ratelimit:${subject}:${minute}`;
     try {
       const [[, count]] = await redis.multi().incr(key).expire(key, 120).exec();
-      res.set('X-RateLimit-Limit', String(config.rateLimitRpm));
-      res.set('X-RateLimit-Remaining', String(Math.max(0, config.rateLimitRpm - Number(count))));
-      if (Number(count) > config.rateLimitRpm) {
+      res.set('X-RateLimit-Limit', String(limitRpm));
+      res.set('X-RateLimit-Remaining', String(Math.max(0, limitRpm - Number(count))));
+      if (Number(count) > limitRpm) {
         metrics?.rateLimited.inc();
         res.set('Retry-After', String(60 - Math.floor((Date.now() / 1000) % 60)));
         return res
           .status(429)
-          .json(errorBody(`Rate limit exceeded: ${config.rateLimitRpm} requests/minute per agent.`, 'rate_limited'));
+          .json(errorBody(`Rate limit exceeded: ${limitRpm} requests/minute per ${label}.`, 'rate_limited'));
       }
       next();
     } catch (err) {
@@ -39,4 +35,38 @@ export function agentRateLimit({ config, redis, metrics }) {
       next();
     }
   };
+}
+
+/** Per-agent velocity brake (agents identified by X-Agent-ID). */
+export function agentRateLimit({ config, redis, metrics }) {
+  if (!config.rateLimitRpm) {
+    return (_req, _res, next) => next();
+  }
+  return fixedWindowLimiter({
+    redis,
+    metrics,
+    limitRpm: config.rateLimitRpm,
+    // Missing ids fall through — the chat route rejects them with 400.
+    keyFor: (req) => req.header('X-Agent-ID'),
+    label: 'agent',
+  });
+}
+
+/**
+ * Per-IP brake, applied BEFORE auth — so unauthenticated attackers hammering
+ * the surface with 401s get throttled too. Requires trust proxy to be set
+ * correctly behind a load balancer (TRUST_PROXY).
+ */
+export function ipRateLimit({ config, redis, metrics }) {
+  const limitRpm = config.ipRateLimitRpm ?? 0;
+  if (!limitRpm) {
+    return (_req, _res, next) => next();
+  }
+  return fixedWindowLimiter({
+    redis,
+    metrics,
+    limitRpm,
+    keyFor: (req) => req.ip,
+    label: 'ip',
+  });
 }

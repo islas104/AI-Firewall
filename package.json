@@ -1,6 +1,6 @@
 {
   "name": "ai-agent-budget-proxy",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Budget-enforcing proxy between AI agents and the OpenAI API — atomic Redis spend tracking, per-agent limits, streaming metering, kill-switch, and a live dashboard.",
   "type": "module",
   "main": "server.js",

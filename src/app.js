@@ -14,7 +14,7 @@ import { adminRouter } from './routes/admin.js';
 import { healthRouter } from './routes/health.js';
 import { proxyAuth, adminAuth } from './middleware/auth.js';
 import { securityHeaders } from './middleware/security.js';
-import { agentRateLimit } from './middleware/rateLimit.js';
+import { agentRateLimit, ipRateLimit } from './middleware/rateLimit.js';
 import { createLogger, createHttpLogger } from './logger.js';
 import { createMetrics, metricsMiddleware } from './metrics.js';
 import { errorBody } from './errors.js';
@@ -40,8 +40,10 @@ export function createApp({ config, redis, budget, upstream, logger, metrics }) 
   app.get('/dashboard', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'dashboard.html')));
   app.get('/dashboard.js', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'dashboard.js')));
 
-  // Proxy surface (Bearer auth when PROXY_API_KEY is set, then rate limiting)
-  app.use('/v1', proxyAuth(config));
+  // Proxy surface. Order: per-IP brake (throttles 401 hammering too) →
+  // auth (with failed-attempt lockout) → per-agent brake → the proxy itself.
+  app.use('/v1', ipRateLimit({ config, redis, metrics }));
+  app.use('/v1', proxyAuth({ config, redis, metrics, logger }));
   app.use('/v1', agentRateLimit({ config, redis, metrics }));
   app.use(chatRouter({ config, budget, upstream, metrics }));
 
@@ -56,7 +58,7 @@ export function createApp({ config, redis, budget, upstream, logger, metrics }) 
   });
 
   // Admin surface (X-Admin-Key auth when ADMIN_API_KEY is set)
-  const requireAdminKey = adminAuth(config, logger);
+  const requireAdminKey = adminAuth({ config, redis, metrics, logger });
   app.use('/admin', requireAdminKey);
   app.use(adminRouter({ config, budget }));
 

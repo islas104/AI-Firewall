@@ -10,11 +10,29 @@ const HOURS = 60 * 60;
 export const config = Object.freeze({
   port: Number(process.env.PORT ?? 3000),
 
-  // Budget
+  // Budget (per agent, UTC calendar day)
   hardDailyLimitUsd: Number(process.env.HARD_DAILY_LIMIT_USD ?? 10),
 
-  // Request rate limiting (requests/minute per agent; 0 disables)
-  rateLimitRpm: Number(process.env.RATE_LIMIT_RPM ?? 60),
+  // Fleet-wide daily ceiling across ALL agents. Closes the agent-ID rotation
+  // loophole: without it, a leaked proxy key could mint fresh agent IDs, each
+  // with a fresh per-agent budget. Defaults to 2x the per-agent limit.
+  // Set to 0 to disable (per-agent limits still apply).
+  totalDailyLimitUsd: Number(
+    process.env.TOTAL_DAILY_LIMIT_USD ?? 2 * Number(process.env.HARD_DAILY_LIMIT_USD ?? 10),
+  ),
+
+  // Optional closed set of permitted agent IDs (comma-separated). When set,
+  // unknown agents get 403 before touching any budget.
+  agentAllowlist: process.env.AGENT_ALLOWLIST
+    ? process.env.AGENT_ALLOWLIST.split(',').map((s) => s.trim()).filter(Boolean)
+    : null,
+
+  // Request rate limiting (requests/minute; 0 disables)
+  rateLimitRpm: Number(process.env.RATE_LIMIT_RPM ?? 60), // per agent
+  ipRateLimitRpm: Number(process.env.IP_RATE_LIMIT_RPM ?? 120), // per client IP
+
+  // Failed-auth attempts allowed per IP per minute before 429 lockout.
+  authFailLimitPerMin: Number(process.env.AUTH_FAIL_LIMIT_PER_MIN ?? 10),
 
   // Infrastructure
   redisUrl: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
@@ -66,6 +84,15 @@ export function validateConfig() {
   }
   if (!Number.isFinite(config.rateLimitRpm) || config.rateLimitRpm < 0) {
     problems.push('RATE_LIMIT_RPM must be zero (disabled) or a positive number.');
+  }
+  if (!Number.isFinite(config.ipRateLimitRpm) || config.ipRateLimitRpm < 0) {
+    problems.push('IP_RATE_LIMIT_RPM must be zero (disabled) or a positive number.');
+  }
+  if (!Number.isFinite(config.totalDailyLimitUsd) || config.totalDailyLimitUsd < 0) {
+    problems.push('TOTAL_DAILY_LIMIT_USD must be zero (disabled) or a positive number.');
+  }
+  if (config.totalDailyLimitUsd > 0 && config.totalDailyLimitUsd < config.hardDailyLimitUsd) {
+    problems.push('TOTAL_DAILY_LIMIT_USD must be >= HARD_DAILY_LIMIT_USD (or 0 to disable).');
   }
   if (!Number.isFinite(config.upstreamTimeoutMs) || config.upstreamTimeoutMs <= 0) {
     problems.push('UPSTREAM_TIMEOUT_MS must be a positive number of milliseconds.');

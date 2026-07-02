@@ -418,8 +418,12 @@ All configuration is environment variables, read once at boot and validated
 |---|---|---|
 | `OPENAI_API_KEY` | — | **Required** unless `MOCK_UPSTREAM=true`. The real upstream key. |
 | `MOCK_UPSTREAM` | `false` | `true` = fabricate completions locally. Real budgets, streaming, kill-switch; zero spend. For demos/CI. |
-| `HARD_DAILY_LIMIT_USD` | `10` | Global per-agent daily ceiling (UTC calendar day). |
+| `HARD_DAILY_LIMIT_USD` | `10` | Per-agent daily ceiling (UTC calendar day). |
+| `TOTAL_DAILY_LIMIT_USD` | `2 × HARD_DAILY_LIMIT_USD` | Fleet-wide daily ceiling across **all** agents — defeats agent-ID rotation. `0` disables. |
+| `AGENT_ALLOWLIST` | unset = open | Comma-separated permitted agent IDs; unknown agents get `403`. |
 | `RATE_LIMIT_RPM` | `60` | Requests/minute per agent. `0` disables. |
+| `IP_RATE_LIMIT_RPM` | `120` | Requests/minute per client IP, applied before auth. `0` disables. |
+| `AUTH_FAIL_LIMIT_PER_MIN` | `10` | Failed auth attempts per IP/minute before `429` lockout. |
 | `PROXY_API_KEY` | unset = open | Bearer key required on `/v1/*` when set. **Set it in production.** |
 | `ADMIN_API_KEY` | unset = open | Key required on `/admin/*` and `/metrics` when set. **Set it in production.** |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Budget store. Supports `redis://user:pass@host:port`. |
@@ -466,10 +470,18 @@ invoice exactly, set `MODEL_PRICING` to the current official rates.
   agent:budget:agents:{YYYY-MM-DD}             agents seen today (TTL 48h)
   agent:ratelimit:{agentId}:{epochMinute}      rate-limit window (TTL 120s)
   ```
+- **Defense in depth against a leaked proxy key.** Budgets are keyed on the
+  client-chosen `X-Agent-ID`, so a leaked key could otherwise mint fresh IDs
+  with fresh budgets. Three independent layers close this: the **fleet-wide
+  global cap** (`TOTAL_DAILY_LIMIT_USD`, enforced in the same atomic Lua
+  script), the optional **agent allowlist**, and **per-IP rate limiting**
+  applied before auth. Failed auth attempts are additionally throttled per IP.
 - **Security:** strict CSP (no inline script anywhere, including the
   dashboard), full security-header set, constant-time key comparison,
   agent-ID validation (blocks Redis key injection), auth headers redacted
-  from logs, non-root container.
+  from logs, per-IP failed-auth lockout, structured audit log for all
+  state-changing admin actions, non-root container, Dependabot + `npm audit`
+  gate in CI.
 
 ---
 

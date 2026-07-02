@@ -20,24 +20,33 @@ const pendingKey = (agentId, day) => `agent:budget:pending:${agentId}:${day}`;
 const limitKey = (agentId) => `agent:budget:limit:${agentId}`;
 const agentsKey = (day) => `agent:budget:agents:${day}`;
 
+// Fleet-wide ledger. '__global__' cannot collide with a real agent: the
+// chat route's agent-ID regex requires an alphanumeric first character.
+const GLOBAL_ID = '__global__';
+
 export function createBudgetStore(redis, config) {
   /** Effective limit: per-agent override if set, else the global ceiling. */
   async function getLimit(agentId) {
     const override = await redis.get(limitKey(agentId));
-    return override !== null ? Number(override) : config.hardDailyLimitUsd;
+    return override === null ? config.hardDailyLimitUsd : Number(override);
   }
 
   /**
-   * Atomically reserve `estimate` USD for an in-flight request.
-   * Returns { status: 'ok'|'halt'|'defer', spent, pending, limit }.
+   * Atomically reserve `estimate` USD for an in-flight request, against both
+   * the agent's daily budget and the fleet-wide global budget.
+   * Returns { status: 'ok'|'halt'|'halt_global'|'defer', spent, pending, limit }.
    */
   async function reserve(agentId, estimate) {
     const day = currentDay();
     const limit = await getLimit(agentId);
+    const globalLimit = config.totalDailyLimitUsd ?? 0; // 0 = disabled
     const [status, spent, pending] = await redis.reserveBudget(
       spentKey(agentId, day),
       pendingKey(agentId, day),
+      spentKey(GLOBAL_ID, day),
+      pendingKey(GLOBAL_ID, day),
       String(limit),
+      String(globalLimit),
       String(estimate),
       String(config.pendingKeyTtlSeconds),
     );
@@ -61,11 +70,32 @@ export function createBudgetStore(redis, config) {
     const newTotal = await redis.commitSpend(
       spentKey(agentId, day),
       pendingKey(agentId, day),
+      spentKey(GLOBAL_ID, day),
+      pendingKey(GLOBAL_ID, day),
       String(actualCost),
       String(reservedEstimate),
       String(config.spentKeyTtlSeconds),
     );
     return Number(newTotal);
+  }
+
+  /** Fleet-wide spend status for today. */
+  async function getGlobalStatus() {
+    const day = currentDay();
+    const [spentRaw, pendingRaw] = await Promise.all([
+      redis.get(spentKey(GLOBAL_ID, day)),
+      redis.get(pendingKey(GLOBAL_ID, day)),
+    ]);
+    const spent = spentRaw ? Number(spentRaw) : 0;
+    const limit = config.totalDailyLimitUsd ?? 0;
+    return {
+      day,
+      totalSpentUsd: roundUsd(spent),
+      totalPendingUsd: roundUsd(pendingRaw ? Number(pendingRaw) : 0),
+      totalLimitUsd: limit,
+      totalRemainingUsd: limit > 0 ? roundUsd(Math.max(0, limit - spent)) : null,
+      exceeded: limit > 0 && spent >= limit,
+    };
   }
 
   /** Full budget status for one agent (today). */
@@ -114,5 +144,5 @@ export function createBudgetStore(redis, config) {
     return getStatus(agentId);
   }
 
-  return { reserve, commit, getStatus, listAgents, setLimit, resetSpend, getLimit };
+  return { reserve, commit, getStatus, getGlobalStatus, listAgents, setLimit, resetSpend, getLimit };
 }

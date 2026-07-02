@@ -6,17 +6,26 @@
 import { Router } from 'express';
 import { errorBody } from '../errors.js';
 
+/** Structured, greppable audit trail for every state-changing admin action. */
+function audit(req, action, details) {
+  (req.log ?? console).warn(
+    { audit: true, action, actorIp: req.ip, ...details },
+    `[audit] ${action} ${JSON.stringify(details)} by ip=${req.ip}`,
+  );
+}
+
 export function adminRouter({ config, budget }) {
   const router = Router();
 
   /** Fleet overview — every agent seen today with spend/limit/status. */
   router.get('/admin/agents', async (_req, res) => {
     try {
-      const agents = await budget.listAgents();
+      const [agents, global] = await Promise.all([budget.listAgents(), budget.getGlobalStatus()]);
       res.json({
         day: agents[0]?.day ?? new Date().toISOString().slice(0, 10),
         globalLimitUsd: config.hardDailyLimitUsd,
         upstream: config.mockUpstream ? 'mock' : 'openai',
+        fleet: global,
         agents,
       });
     } catch (err) {
@@ -46,7 +55,7 @@ export function adminRouter({ config, budget }) {
     }
     try {
       const status = await budget.setLimit(req.params.agentId, clearing ? null : limitUsd);
-      console.log(`[admin] limit ${clearing ? 'cleared' : `set to $${limitUsd}`} for agent=${req.params.agentId}`);
+      audit(req, 'set_agent_limit', { agentId: req.params.agentId, limitUsd: clearing ? null : limitUsd });
       res.json(status);
     } catch (err) {
       console.error('[admin] set limit failed:', err.message);
@@ -58,7 +67,7 @@ export function adminRouter({ config, budget }) {
   router.delete('/admin/agents/:agentId/spend', async (req, res) => {
     try {
       const status = await budget.resetSpend(req.params.agentId);
-      console.warn(`[admin] spend RESET for agent=${req.params.agentId}`);
+      audit(req, 'reset_agent_spend', { agentId: req.params.agentId });
       res.json(status);
     } catch (err) {
       console.error('[admin] reset failed:', err.message);

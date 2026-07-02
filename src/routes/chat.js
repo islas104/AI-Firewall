@@ -44,6 +44,12 @@ export function chatRouter({ config, budget, upstream, metrics }) {
           ),
         );
     }
+    if (config.agentAllowlist && !config.agentAllowlist.includes(agentId)) {
+      log.warn(`[allowlist] rejected unknown agent=${agentId} ip=${req.ip}`);
+      return res
+        .status(403)
+        .json(errorBody(`Agent "${agentId}" is not on the allowlist.`, 'agent_not_allowed'));
+    }
     if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
       return res
         .status(400)
@@ -71,6 +77,15 @@ export function chatRouter({ config, budget, upstream, metrics }) {
         `[halt] agent=${agentId} spent=$${reservation.spent.toFixed(4)} >= limit=$${reservation.limit}`,
       );
       return res.status(402).json(HALT_BODY);
+    }
+    if (reservation.status === 'halt_global') {
+      metrics?.globalBudgetHalts.inc();
+      log.error(
+        `[halt-global] fleet-wide daily budget exhausted — agent=${agentId} rejected`,
+      );
+      return res
+        .status(402)
+        .json(errorBody('Global daily budget exceeded. All agent execution halted.', 'global_budget_exceeded'));
     }
     if (reservation.status === 'defer') {
       // Committed spend is still under the limit, but in-flight requests have
