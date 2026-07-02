@@ -434,7 +434,7 @@ All configuration is environment variables, read once at boot and validated
 | `MODEL_PRICING` | built-in table | JSON overriding prices: `{"gpt-4o-mini":{"input":0.0015,"output":0.002}}` — USD per 1,000 tokens. |
 | `DEFAULT_COMPLETION_ESTIMATE` | `1024` | Output-token estimate used for reservation when a request has no `max_tokens`. |
 | `LOG_LEVEL` | `info` | pino level: `debug`, `info`, `warn`, `error`, `silent`. |
-| `TRUST_PROXY` | `0` | Number of trusted reverse-proxy hops (set `1` on Railway/behind one LB). |
+| `TRUST_PROXY` | `0` | Number of trusted reverse-proxy hops. **Railway needs `2`** (edge + internal LB) — verify by checking that logged client IPs are real, not `152.233.x.x` edge IPs. |
 | `ENABLE_HSTS` | `false` | Send HSTS header. Only enable behind TLS. |
 
 **Pricing note:** built-in rates are the project's baseline spec values and are
