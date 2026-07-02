@@ -6,6 +6,11 @@ metered to the exact dollar, and gets **blocked the moment an agent exceeds its
 daily budget**. A bugged agent stuck in an infinite loop can burn *at most* its
 daily limit — never your whole account.
 
+![AI Firewall live dashboard — agent fleet with spend bars and a halted runaway agent](docs/dashboard.png)
+
+*The live control room: 8 agents metered in real time — `runaway-bot` tripped
+its budget and was halted by the 402 kill-switch.*
+
 ```
 ┌─────────────┐  POST /v1/chat/completions   ┌──────────────┐   forward    ┌─────────┐
 │  Your agent │ ───────────────────────────▶ │  AI Firewall │ ───────────▶ │ OpenAI  │
@@ -388,6 +393,8 @@ Current budget status for one agent:
 ---
 
 ## The dashboard
+
+![Dashboard screenshot](docs/dashboard.png)
 
 `/dashboard` is a zero-dependency live control room (auto-refreshes every 2 s).
 If an admin key is configured it prompts once and remembers it in
