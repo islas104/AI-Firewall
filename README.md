@@ -24,6 +24,54 @@ its budget and was halted by the 402 kill-switch.*
 
 ---
 
+## 🔴 Try it live — no signup, no key of your own
+
+A public beta instance is running with **real OpenAI traffic**, protected by
+the firewall itself. Point anything OpenAI-compatible at it:
+
+```
+Base URL:   https://proxy-production-605f.up.railway.app/v1
+Proxy key:  pk_0a3b72680ec32aad0ba4e687e55382d9c4c47a72cff407c7
+Header:     X-Agent-ID: <pick-any-name-for-your-agent>
+```
+
+Try it in 10 seconds:
+
+```bash
+curl https://proxy-production-605f.up.railway.app/v1/chat/completions \
+  -H "Authorization: Bearer pk_0a3b72680ec32aad0ba4e687e55382d9c4c47a72cff407c7" \
+  -H "Content-Type: application/json" \
+  -H "X-Agent-ID: $(whoami)-test" \
+  -d '{"model":"gpt-4o-mini","max_tokens":60,"messages":[{"role":"user","content":"hello from the firewall demo"}]}' -i
+```
+
+Check the `X-Budget-*` response headers — that's your metered spend. Keep
+calling and you'll hit the limits by design:
+
+- **$0.50/day per agent ID**, **$2.00/day across all testers** → then `402
+  Budget exceeded` (the kill-switch you came to see)
+- 20 requests/min per agent → `429`
+- Budget resets at midnight UTC
+
+Or from Python — swap two lines in any existing OpenAI app:
+
+```python
+client = OpenAI(
+    base_url="https://proxy-production-605f.up.railway.app/v1",
+    api_key="pk_0a3b72680ec32aad0ba4e687e55382d9c4c47a72cff407c7",
+    default_headers={"X-Agent-ID": "your-name-here"},
+)
+```
+
+Check your agent's budget anytime (needs the same Bearer key):
+`GET /v1/budget/<your-agent-id>`
+
+*Fair use: this is a demo pool funded by one developer's prepaid credits. The
+firewall caps the blast radius (that's the product), and the key rotates if
+abused. Prompts pass through to OpenAI — don't send anything sensitive.*
+
+---
+
 ## Table of contents
 
 1. [The problem this solves](#the-problem-this-solves)
