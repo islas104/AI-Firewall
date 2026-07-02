@@ -1,5 +1,10 @@
 # AI Firewall — Agent Budget Proxy
 
+[![CI](https://github.com/islas104/AI-Firewall/actions/workflows/ci.yml/badge.svg)](https://github.com/islas104/AI-Firewall/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A518.17-brightgreen)](package.json)
+[![Redis](https://img.shields.io/badge/redis-7-red)](docker-compose.yml)
+
 **A hard spending limit for AI agents.** AI Firewall is a proxy server that sits
 between your AI agents and the OpenAI API. Every request passes through it, gets
 metered to the exact dollar, and gets **blocked the moment an agent exceeds its
@@ -88,6 +93,7 @@ abused. Prompts pass through to OpenAI — don't send anything sensitive.*
 12. [Testing](#testing)
 13. [Troubleshooting](#troubleshooting)
 14. [Project structure](#project-structure)
+15. [Known limitations & roadmap](#known-limitations--roadmap)
 
 ---
 
@@ -109,6 +115,21 @@ that reacts *instantly*. AI Firewall closes that gap:
   reaches OpenAI and costs $0**.
 - The budget resets at midnight UTC, or you reset it manually from the
   dashboard.
+
+### Who is this for?
+
+| You are… | Your problem | What the firewall gives you |
+|---|---|---|
+| An indie dev / startup with an AI feature in production | A bad deploy makes your bot retry-loop overnight → surprise bill | Hard daily cap per agent; the loop dies at the limit, not at your credit card |
+| A team running multiple agents on one OpenAI account | "Which agent spent $80 yesterday?" — OpenAI's dashboard has no concept of *agent* | Per-agent attribution, per-agent limits, live fleet dashboard |
+| Experimenting with agent frameworks (LangChain loops, CrewAI, AutoGPT-style) | Experimental agents are exactly the ones that loop | Cap each experiment at $2/day and iterate fearlessly |
+| Giving developers/teammates API access | Handing out the raw `sk-` key means unlimited, unattributable spend per person | Each person is an "agent" with an allowance; revoke one env var, not the account |
+
+**Where this sits in the market:** budget-enforcing LLM gateways are a real
+product category (Helicone, Portkey, LiteLLM proxy, Cloudflare AI Gateway).
+AI Firewall is the lightweight, **self-hosted** take: one container + Redis,
+your keys and traffic never touch a third-party SaaS, and enforcement is
+atomic rather than eventually-consistent.
 
 ---
 
@@ -369,6 +390,25 @@ If a proxy key leaks: the attacker can spend **at most your daily limits**, and
 you rotate one env var. If your raw OpenAI key had leaked instead, they could
 drain the account. That asymmetry is the product.
 
+### Explicit threat model — what an attacker gets
+
+| Attack | Defense | Worst-case damage |
+|---|---|---|
+| Leaked **proxy key**, one agent ID | Per-agent daily budget | `HARD_DAILY_LIMIT_USD` per day |
+| Leaked proxy key + **rotating agent IDs** (minting fresh budgets) | Fleet-wide `TOTAL_DAILY_LIMIT_USD` enforced in the same atomic Lua script; optional `AGENT_ALLOWLIST` | `TOTAL_DAILY_LIMIT_USD` per day — hard stop |
+| Request flooding (paid or unauthenticated) | Per-agent RPM + per-IP RPM (applied *before* auth) | Throttled at the edge; 401s can't be hammered |
+| Key brute-forcing | 48-hex-char keys (~2¹⁹² space) + per-IP failed-auth lockout (`429` after N misses/min) + `auth_failures_total` metric | Not practical |
+| Timing side-channel on key comparison | `crypto.timingSafeEqual` on both surfaces | None |
+| Redis key injection via crafted `X-Agent-ID` | Strict ID regex at the boundary (`[A-Za-z0-9._-]`, 64 max, alphanumeric start) | Rejected with `400` |
+| XSS on the dashboard | Strict CSP — `script-src 'self'`, zero inline script, all output HTML-escaped | Blocked by policy |
+| Race conditions on the budget under concurrency | Reserve/commit inside single Lua scripts; proven by a 40-request concurrent burst test | Committed spend cannot exceed the ceiling |
+| Redis outage | **Fail closed** — `503`, nothing forwarded | $0 spent while blind |
+| Rogue/compromised admin | Structured audit log of every state-changing admin action (actor IP, action, target) | Detectable, attributable |
+
+Behind all of it, run OpenAI **prepaid credits with auto-recharge off** — an
+absolute account-level ceiling the proxy can't exceed even if everything above
+fails.
+
 ---
 
 ## Full API reference
@@ -559,19 +599,21 @@ Scrape config needs the header: `Authorization` is unused; set
 ## Testing
 
 ```bash
-docker compose up -d redis   # integration tests need Redis (they use DBs 14/15)
+docker compose up -d redis   # integration tests need Redis (they use DBs 13-15)
 npm test
 ```
 
-27 tests across three suites:
+33 tests across four suites:
 
 - **Unit** — pricing math, estimation, config merging.
 - **Integration** — real Express + real Redis + mock upstream: metering,
   kill-switch exact body, reservation guard, **a 40-request concurrent burst
-  proving the ceiling holds**, streaming metering, admin flows, auth, malformed
-  input.
+  proving the per-agent ceiling holds**, streaming metering, admin flows,
+  auth, malformed input.
 - **Production hardening** — security headers, agent-ID validation, per-agent
   rate limiting, metrics auth, oversized bodies.
+- **Security round 2** — **an agent-ID rotation attack proving the fleet-wide
+  cap holds**, allowlist enforcement, per-IP throttling, failed-auth lockout.
 
 CI (GitHub Actions) runs the suite against a Redis service container, then
 builds the Docker image and smoke-tests a real container end-to-end.
@@ -623,6 +665,30 @@ builds the Docker image and smoke-tests a real container end-to-end.
 └── railway.json              # Railway build/deploy config
 ```
 
+---
+
+## Known limitations & roadmap
+
+Stated plainly, because a safety tool you don't understand the edges of isn't
+a safety tool:
+
+| Limitation | Detail | Roadmap |
+|---|---|---|
+| OpenAI-only | Chat Completions shape + OpenAI pricing tables | Anthropic & Gemini upstreams (new pricing tables + payload adapters) |
+| Trusts reported usage | Cost comes from the API's own `usage` block, not independent token counting | Optional tiktoken-based verification |
+| Safety brake, not a billing ledger | 6-dp rounding, conservative estimates; totals are enforcement-grade, not invoice-grade | Reconciliation report against the OpenAI usage API |
+| Daily granularity | UTC calendar days only | Weekly / monthly rolling windows |
+| Single proxy key | One `PROXY_API_KEY` for all agents | Per-agent keys with scoped budgets |
+| No persistence of history | Spend keys expire after 48 h by design | Optional export to a time-series store |
+
+## Author
+
+Built by **Islas Ahmed Nawaz** — [GitHub](https://github.com/islas104) ·
+[LinkedIn](https://www.linkedin.com/in/islasnawaz)
+
+Issues and PRs welcome. If this saved you from a runaway bill, a star helps
+other people find it before their runaway bill.
+
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 Islas Ahmed Nawaz
