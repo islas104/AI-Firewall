@@ -17,6 +17,7 @@ import { securityHeaders } from './middleware/security.js';
 import { agentRateLimit, ipRateLimit } from './middleware/rateLimit.js';
 import { createLogger, createHttpLogger } from './logger.js';
 import { createMetrics, metricsMiddleware } from './metrics.js';
+import { isValidAgentId } from './budget.js';
 import { errorBody } from './errors.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -33,6 +34,11 @@ export function createApp({ config, redis, budget, upstream, logger, metrics }) 
   app.use(securityHeaders(config));
   app.use(createHttpLogger(logger));
   app.use(metricsMiddleware(metrics));
+
+  // Per-IP rate limit runs BEFORE body parsing so a flood of large bodies is
+  // throttled before 2MB is buffered per connection (needs only req.ip).
+  app.use(ipRateLimit({ config, redis, metrics }));
+
   app.use(express.json({ limit: '2mb' }));
 
   // Public surfaces
@@ -40,15 +46,18 @@ export function createApp({ config, redis, budget, upstream, logger, metrics }) 
   app.get('/dashboard', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'dashboard.html')));
   app.get('/dashboard.js', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'dashboard.js')));
 
-  // Proxy surface. Order: per-IP brake (throttles 401 hammering too) →
-  // auth (with failed-attempt lockout) → per-agent brake → the proxy itself.
-  app.use('/v1', ipRateLimit({ config, redis, metrics }));
+  // Proxy surface. Order: auth (with failed-attempt lockout) → per-agent
+  // brake → the proxy itself. (Per-IP brake already applied globally above.)
   app.use('/v1', proxyAuth({ config, redis, metrics, logger }));
   app.use('/v1', agentRateLimit({ config, redis, metrics }));
   app.use(chatRouter({ config, budget, upstream, metrics }));
 
-  // Back-compat public budget lookup (same auth as the proxy surface)
+  // Back-compat public budget lookup (same auth as the proxy surface).
+  // Validates the id so the reserved __global__ ledger can't be read here.
   app.get('/v1/budget/:agentId', async (req, res) => {
+    if (!isValidAgentId(req.params.agentId)) {
+      return res.status(400).json(errorBody('Invalid agent id.', 'invalid_agent_id'));
+    }
     try {
       res.json(await budget.getStatus(req.params.agentId));
     } catch (err) {

@@ -18,27 +18,30 @@ function safeEqual(a, b) {
   return timingSafeEqual(bufA, bufB);
 }
 
-function failKey(ip) {
-  return `authfail:${ip}:${Math.floor(Date.now() / 60000)}`;
+// Surface-scoped so failures on the public /v1 surface can't exhaust the
+// admin surface's brute-force allowance (and vice versa).
+function failKey(surface, ip) {
+  return `authfail:${surface}:${ip}:${Math.floor(Date.now() / 60000)}`;
 }
 
 /** True if this IP has burned through its failed-attempt allowance. */
-async function isLockedOut(redis, ip, limit) {
+async function isLockedOut(redis, surface, ip, limit) {
   if (!redis || !limit) return false;
   try {
-    const count = await redis.get(failKey(ip));
+    const count = await redis.get(failKey(surface, ip));
     return Number(count ?? 0) >= limit;
   } catch {
     return false; // Redis blip — the key comparison still protects us
   }
 }
 
-async function recordFailure(redis, ip, metrics, logger, surface) {
+async function recordFailure(redis, surface, ip, metrics, logger) {
   metrics?.authFailures.inc();
   logger?.warn?.(`[auth] failed ${surface} auth attempt from ip=${ip}`);
   if (!redis) return;
+  const key = failKey(surface, ip);
   try {
-    await redis.multi().incr(failKey(ip)).expire(failKey(ip), 120).exec();
+    await redis.multi().incr(key).expire(key, 120).exec();
   } catch {
     /* counting is best-effort */
   }
@@ -53,14 +56,14 @@ export function proxyAuth({ config, redis, metrics, logger = console }) {
   }
   const failLimit = config.authFailLimitPerMin ?? 0;
   return async (req, res, next) => {
-    if (await isLockedOut(redis, req.ip, failLimit)) {
+    if (await isLockedOut(redis, 'proxy', req.ip, failLimit)) {
       res.set('Retry-After', '60');
       return res.status(429).json(LOCKOUT_BODY);
     }
     const header = req.header('Authorization') ?? '';
     const token = header.startsWith('Bearer ') ? header.slice(7) : '';
     if (!safeEqual(token, config.proxyApiKey)) {
-      await recordFailure(redis, req.ip, metrics, req.log ?? logger, 'proxy');
+      await recordFailure(redis, 'proxy', req.ip, metrics, req.log ?? logger);
       return res.status(401).json(errorBody('Invalid or missing proxy API key.', 'unauthorized'));
     }
     next();
@@ -75,12 +78,12 @@ export function adminAuth({ config, redis, metrics, logger = console }) {
   }
   const failLimit = config.authFailLimitPerMin ?? 0;
   return async (req, res, next) => {
-    if (await isLockedOut(redis, req.ip, failLimit)) {
+    if (await isLockedOut(redis, 'admin', req.ip, failLimit)) {
       res.set('Retry-After', '60');
       return res.status(429).json(LOCKOUT_BODY);
     }
     if (!safeEqual(req.header('X-Admin-Key') ?? '', config.adminApiKey)) {
-      await recordFailure(redis, req.ip, metrics, req.log ?? logger, 'admin');
+      await recordFailure(redis, 'admin', req.ip, metrics, req.log ?? logger);
       return res.status(401).json(errorBody('Invalid or missing admin key.', 'unauthorized'));
     }
     next();

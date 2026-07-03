@@ -24,6 +24,16 @@ const agentsKey = (day) => `agent:budget:agents:${day}`;
 // chat route's agent-ID regex requires an alphanumeric first character.
 const GLOBAL_ID = '__global__';
 
+// Same alphabet the chat route enforces. Routes that take :agentId from the
+// URL (budget lookup, admin) must apply this too, or a caller could address
+// the reserved GLOBAL_ID ledger or inject Redis key segments.
+const AGENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** True if `id` is a safe, non-reserved agent identifier. */
+export function isValidAgentId(id) {
+  return typeof id === 'string' && id !== GLOBAL_ID && AGENT_ID_RE.test(id);
+}
+
 export function createBudgetStore(redis, config) {
   /** Effective limit: per-agent override if set, else the global ceiling. */
   async function getLimit(agentId) {
@@ -50,13 +60,17 @@ export function createBudgetStore(redis, config) {
       String(estimate),
       String(config.pendingKeyTtlSeconds),
     );
-    // Register the agent for dashboard discovery (fire-and-forget semantics,
-    // but awaited so errors surface in logs via the caller's catch).
-    await redis
-      .multi()
-      .sadd(agentsKey(day), agentId)
-      .expire(agentsKey(day), config.spentKeyTtlSeconds)
-      .exec();
+    // Register the agent for dashboard discovery ONLY when a reservation
+    // actually succeeded. Registering on rejected requests let an attacker
+    // bloat this SET (and the O(N) /admin/agents fan-out) with rotating IDs
+    // at zero budget cost.
+    if (status === 'ok') {
+      await redis
+        .multi()
+        .sadd(agentsKey(day), agentId)
+        .expire(agentsKey(day), config.spentKeyTtlSeconds)
+        .exec();
+    }
     return { status, spent: Number(spent), pending: Number(pending), limit };
   }
 

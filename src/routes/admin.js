@@ -5,6 +5,7 @@
  */
 import { Router } from 'express';
 import { errorBody } from '../errors.js';
+import { isValidAgentId } from '../budget.js';
 
 /** Structured, greppable audit trail for every state-changing admin action. */
 function audit(req, action, details) {
@@ -17,13 +18,24 @@ function audit(req, action, details) {
 export function adminRouter({ config, budget }) {
   const router = Router();
 
+  // Validate every :agentId path param once — rejects the reserved
+  // __global__ ledger id and any malformed/injection value with a 400.
+  router.param('agentId', (req, res, next, agentId) => {
+    if (!isValidAgentId(agentId)) {
+      return res.status(400).json(errorBody('Invalid agent id.', 'invalid_agent_id'));
+    }
+    next();
+  });
+
   /** Fleet overview — every agent seen today with spend/limit/status. */
   router.get('/admin/agents', async (_req, res) => {
     try {
       const [agents, global] = await Promise.all([budget.listAgents(), budget.getGlobalStatus()]);
       res.json({
         day: agents[0]?.day ?? new Date().toISOString().slice(0, 10),
-        globalLimitUsd: config.hardDailyLimitUsd,
+        perAgentLimitUsd: config.hardDailyLimitUsd,
+        globalLimitUsd: config.hardDailyLimitUsd, // kept for dashboard back-compat
+        totalDailyLimitUsd: config.totalDailyLimitUsd,
         upstream: config.mockUpstream ? 'mock' : 'openai',
         fleet: global,
         agents,

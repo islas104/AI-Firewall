@@ -42,14 +42,16 @@ test('loadPricing returns defaults when env JSON is invalid', () => {
   assert.equal(loadPricing('{not json'), DEFAULT_PRICING);
 });
 
-test('estimateCost uses max_tokens when provided', () => {
+test('estimateCost uses max_tokens for the completion and a conservative prompt estimate', () => {
   const payload = {
     model: 'gpt-4o-mini',
     max_tokens: 100,
-    messages: [{ role: 'user', content: 'x'.repeat(400) }], // ≈100 prompt tokens
+    messages: [{ role: 'user', content: 'x'.repeat(400) }],
   };
+  // Prompt estimate is deliberately pessimistic (~chars/3, not chars/4) so a
+  // reservation never under-counts dense/non-English text. 400 chars → 134.
   const est = estimateCost(DEFAULT_PRICING, payload, 1024);
-  assert.equal(est, computeCost(DEFAULT_PRICING, 'gpt-4o-mini', 100, 100));
+  assert.equal(est, computeCost(DEFAULT_PRICING, 'gpt-4o-mini', Math.ceil(400 / 3), 100));
 });
 
 test('estimateCost falls back to default completion estimate', () => {

@@ -13,14 +13,62 @@
  * the final SSE chunk carries token counts, metered after the stream ends.
  */
 import { Router } from 'express';
-import { computeCost, estimateCost, roundUsd } from '../pricing.js';
+import { computeCost, estimateCost, roundUsd, hasPricing } from '../pricing.js';
 import { errorBody } from '../errors.js';
 
 const HALT_BODY = { error: 'Budget exceeded. Agent execution halted.' };
 
 // Agent ids become Redis key segments and metric log fields — constrain them
 // to a safe alphabet and bounded length at the boundary.
-const AGENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const AGENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+// `model` is used as an object key, forwarded upstream, and logged — bound it.
+const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+
+/**
+ * Validate the request body at the boundary. Returns an { error } describing
+ * a 400, or null if the payload is safe to price and forward. This is where
+ * the pen-test findings are closed: negative/huge max_tokens, null message
+ * elements, prototype-colliding or unpriced model names.
+ */
+function validateChatPayload(payload, config) {
+  if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
+    return { type: 'invalid_request', message: 'Request body must include a non-empty "messages" array.' };
+  }
+  // Every element must be a non-null object — otherwise estimateCost throws
+  // before the try/catch and the request hangs with no response.
+  for (const m of payload.messages) {
+    if (typeof m !== 'object' || m === null || Array.isArray(m)) {
+      return { type: 'invalid_request', message: 'Each item in "messages" must be an object.' };
+    }
+  }
+
+  if (payload.model !== undefined && (typeof payload.model !== 'string' || !MODEL_RE.test(payload.model))) {
+    return { type: 'invalid_request', message: 'Invalid "model": must be a short alphanumeric identifier.' };
+  }
+  const model = payload.model ?? 'gpt-4o-mini';
+  if (config.rejectUnknownModels && !hasPricing(config.pricing, model)) {
+    return {
+      type: 'unknown_model',
+      message: `Model "${model}" has no configured pricing and cannot be metered. Add it to MODEL_PRICING or use a known model.`,
+    };
+  }
+
+  for (const field of ['max_tokens', 'max_completion_tokens']) {
+    const v = payload[field];
+    if (v === undefined || v === null) continue;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 1 || !Number.isInteger(v)) {
+      return { type: 'invalid_request', message: `"${field}" must be a positive integer.` };
+    }
+    if (v > config.maxTokensCeiling) {
+      return {
+        type: 'invalid_request',
+        message: `"${field}" exceeds the maximum of ${config.maxTokensCeiling}.`,
+      };
+    }
+  }
+  return null;
+}
 
 export function chatRouter({ config, budget, upstream, metrics }) {
   const router = Router();
@@ -50,10 +98,10 @@ export function chatRouter({ config, budget, upstream, metrics }) {
         .status(403)
         .json(errorBody(`Agent "${agentId}" is not on the allowlist.`, 'agent_not_allowed'));
     }
-    if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
-      return res
-        .status(400)
-        .json(errorBody('Request body must include a non-empty "messages" array.', 'invalid_request'));
+
+    const invalid = validateChatPayload(payload, config);
+    if (invalid) {
+      return res.status(400).json(errorBody(invalid.message, invalid.type));
     }
 
     const model = payload.model ?? 'gpt-4o-mini';
@@ -136,10 +184,9 @@ async function handleBlocking({ res, config, upstream, release, agentId, model, 
   } catch (err) {
     await release(0); // pure release — nothing was spent... that we know of
     metrics?.upstreamErrors.inc();
-    const status = err?.status ?? 502;
-    const message = err?.error?.message ?? err?.message ?? 'Upstream request failed.';
-    log.error(`[upstream] agent=${agentId} status=${status} message=${message}`);
-    return res.status(status).json(errorBody(message, 'upstream_error'));
+    const { status, clientMessage } = classifyUpstreamError(err);
+    log.error(`[upstream] agent=${agentId} status=${status} raw=${err?.error?.message ?? err?.message}`);
+    return res.status(status).json(errorBody(clientMessage, 'upstream_error'));
   }
 
   const usage = completion.usage ?? { prompt_tokens: 0, completion_tokens: 0 };
@@ -162,10 +209,9 @@ async function handleStream({ req, res, config, upstream, release, agentId, mode
   } catch (err) {
     await release(0);
     metrics?.upstreamErrors.inc();
-    const status = err?.status ?? 502;
-    const message = err?.error?.message ?? err?.message ?? 'Upstream request failed.';
-    log.error(`[upstream] agent=${agentId} status=${status} message=${message}`);
-    return res.status(status).json(errorBody(message, 'upstream_error'));
+    const { status, clientMessage } = classifyUpstreamError(err);
+    log.error(`[upstream] agent=${agentId} status=${status} raw=${err?.error?.message ?? err?.message}`);
+    return res.status(status).json(errorBody(clientMessage, 'upstream_error'));
   }
 
   res.status(200).set({
@@ -192,11 +238,12 @@ async function handleStream({ req, res, config, upstream, release, agentId, mode
   } catch (err) {
     log.error(`[stream] agent=${agentId} aborted: ${err.message}`);
   } finally {
-    // Meter from real usage when present; if the stream died before the
-    // usage chunk, charge a conservative estimate from what actually flowed.
+    // Meter from real usage when present. If the stream died before the usage
+    // chunk, fail CONSERVATIVELY: charge the larger of the full reservation
+    // estimate and what actually flowed, never the possibly-zero char count.
     const cost = usage
       ? computeCost(config.pricing, model, usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0)
-      : Math.min(estimate, computeCost(config.pricing, model, 0, Math.ceil(streamedChars / 4)));
+      : Math.max(estimate, computeCost(config.pricing, model, 0, Math.ceil(streamedChars / 4)));
     const newTotal = await release(cost);
     logMeter(log, {
       agentId,
@@ -222,10 +269,27 @@ function setBudgetHeaders(res, cost, newTotal, limit) {
   }
 }
 
+/**
+ * Map an upstream (OpenAI) error to a safe status + client message. Auth and
+ * permission failures can echo a partially-masked key or org details, so those
+ * are replaced with a generic message (the raw text still goes to the logs).
+ */
+function classifyUpstreamError(err) {
+  const status = Number.isInteger(err?.status) ? err.status : 502;
+  if (status === 401 || status === 403) {
+    return { status: 502, clientMessage: 'Upstream authentication error. The proxy operator has been notified.' };
+  }
+  const raw = err?.error?.message ?? err?.message ?? 'Upstream request failed.';
+  // Bound the relayed message and strip anything key-shaped defensively.
+  const clientMessage = String(raw).slice(0, 300).replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***');
+  return { status, clientMessage };
+}
+
 function logMeter(log, { agentId, model, usage, cost, newTotal, limit }) {
   const limitSuffix = limit ? '/' + limit : '';
+  const safeModel = String(model).slice(0, 64);
   log.info(
-    `[meter] agent=${agentId} model=${model} in=${usage.prompt_tokens} out=${usage.completion_tokens} ` +
+    `[meter] agent=${agentId} model=${safeModel} in=${usage.prompt_tokens} out=${usage.completion_tokens} ` +
       `cost=$${roundUsd(cost).toFixed(6)} total=$${roundUsd(newTotal).toFixed(4)}${limitSuffix}`,
   );
 }

@@ -62,7 +62,19 @@ export const config = Object.freeze({
   pricing: loadPricing(process.env.MODEL_PRICING),
 
   // Fallback completion-token estimate when the request has no max_tokens.
-  defaultCompletionEstimate: Number(process.env.DEFAULT_COMPLETION_ESTIMATE ?? 1024),
+  // Deliberately high (4096) so an unspecified-length completion reserves a
+  // realistic worst case rather than under-reserving at 1024.
+  defaultCompletionEstimate: Number(process.env.DEFAULT_COMPLETION_ESTIMATE ?? 4096),
+
+  // Hard ceiling on client-supplied max_tokens. Bounds a single request's
+  // reservation so one caller can't park the whole fleet budget with an
+  // absurd max_tokens value (the reservation-parking DoS).
+  maxTokensCeiling: Number(process.env.MAX_TOKENS_CEILING ?? 32000),
+
+  // When true, requests for a model with no explicit pricing entry are
+  // rejected (400 unknown_model) instead of billed at the DEFAULT tier —
+  // stops an expensive model being under-recorded past the ceiling.
+  rejectUnknownModels: process.env.REJECT_UNKNOWN_MODELS !== 'false',
 
   // Daily spend keys live 48h (covers timezone skew + lets dashboards read
   // yesterday). Pending reservations self-heal after 10 min if a process

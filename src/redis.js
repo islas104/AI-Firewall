@@ -31,6 +31,9 @@ local aPending = tonumber(redis.call('GET', KEYS[2]) or '0')
 local aLimit = tonumber(ARGV[1])
 local gLimit = tonumber(ARGV[2])
 local estimate = tonumber(ARGV[3])
+-- Defense in depth: a non-positive/NaN estimate must never decrement the
+-- pending counters (that was the negative-max_tokens ledger-poisoning bug).
+if not estimate or estimate < 0 then estimate = 0 end
 if aSpent >= aLimit then
   return {'halt', tostring(aSpent), tostring(aPending)}
 end
@@ -47,9 +50,9 @@ end
 if aSpent + aPending + estimate > aLimit then
   return {'defer', tostring(aSpent), tostring(aPending)}
 end
-redis.call('INCRBYFLOAT', KEYS[2], ARGV[3])
+redis.call('INCRBYFLOAT', KEYS[2], estimate)
 redis.call('EXPIRE', KEYS[2], ARGV[4])
-redis.call('INCRBYFLOAT', KEYS[4], ARGV[3])
+redis.call('INCRBYFLOAT', KEYS[4], estimate)
 redis.call('EXPIRE', KEYS[4], ARGV[4])
 return {'ok', tostring(aSpent), tostring(aPending + estimate)}
 `;
@@ -63,13 +66,20 @@ return {'ok', tostring(aSpent), tostring(aPending + estimate)}
  * Returns the agent's new committed total.
  */
 const COMMIT_LUA = `
-local spent = redis.call('INCRBYFLOAT', KEYS[1], ARGV[1])
+-- Clamp both args to non-negative so a malformed reservation can never build
+-- a doubly-signed literal ('--1.99') that aborts the script mid-way and
+-- leaves the ledger corrupted. Numeric negation, never string concatenation.
+local cost = tonumber(ARGV[1])
+local reserved = tonumber(ARGV[2])
+if not cost or cost < 0 then cost = 0 end
+if not reserved or reserved < 0 then reserved = 0 end
+local spent = redis.call('INCRBYFLOAT', KEYS[1], cost)
 redis.call('EXPIRE', KEYS[1], ARGV[3])
-local pending = tonumber(redis.call('INCRBYFLOAT', KEYS[2], '-' .. ARGV[2]))
+local pending = tonumber(redis.call('INCRBYFLOAT', KEYS[2], -reserved))
 if pending <= 0 then redis.call('DEL', KEYS[2]) end
-redis.call('INCRBYFLOAT', KEYS[3], ARGV[1])
+redis.call('INCRBYFLOAT', KEYS[3], cost)
 redis.call('EXPIRE', KEYS[3], ARGV[3])
-local gPending = tonumber(redis.call('INCRBYFLOAT', KEYS[4], '-' .. ARGV[2]))
+local gPending = tonumber(redis.call('INCRBYFLOAT', KEYS[4], -reserved))
 if gPending <= 0 then redis.call('DEL', KEYS[4]) end
 return spent
 `;
