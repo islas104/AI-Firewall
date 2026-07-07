@@ -61,37 +61,105 @@ async function api(path, opts = {}, allowRetry = true) {
   return res.json();
 }
 
-/* ---------- sparkline: spend velocity (delta per tick) ---------- */
+/* ---------- spend history chart (persistent, from /admin/history) ---------- */
 
-const history = [];
-let lastTotal = null;
+const HIST_DAYS = 14;
+const HIST_W = 340;
+const HIST_H = 66;
 
-function pushVelocity(total) {
-  if (lastTotal !== null) history.push(Math.max(0, total - lastTotal));
-  lastTotal = total;
-  if (history.length > 48) history.shift();
+// Aggregate the per-agent history into a { day -> total } series over the
+// last HIST_DAYS, filling missing days with 0 so the axis is continuous.
+function aggregateHistory(history) {
+  if (!history) return [];
+  const totals = new Map(history.days.map((d) => [d, 0]));
+  for (const agent of history.agents) {
+    for (const [day, amt] of Object.entries(agent.byDay)) {
+      if (totals.has(day)) totals.set(day, totals.get(day) + amt);
+    }
+  }
+  return history.days.map((day) => ({ day, total: totals.get(day) ?? 0 }));
 }
 
-function drawSpark() {
-  const svg = $('spark');
-  const W = 180,
-    H = 52,
-    PAD = 2;
-  const n = history.length;
-  if (!n) {
-    svg.innerHTML = '';
+function drawHistory(series) {
+  const svg = $('history');
+  if (!series.length) {
+    svg.innerHTML = `<text x="${HIST_W / 2}" y="${HIST_H / 2}" text-anchor="middle" class="hist-axis">no spend recorded yet</text>`;
     return;
   }
-  const max = Math.max(...history, 1e-9);
-  const bw = Math.max(2, (W - PAD * 2) / 48 - 1.5);
-  const bars = history.map((v, i) => {
-    const h = v > 0 ? Math.max(2, (v / max) * (H - PAD * 2)) : 1.5;
-    const x = PAD + i * ((W - PAD * 2) / 48);
-    const color = v > 0 ? 'oklch(76% 0.17 155 / 0.9)' : 'oklch(35% 0.02 255)';
-    return `<rect x="${x.toFixed(1)}" y="${(H - PAD - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="${color}"/>`;
+  const PAD_B = 12; // room for the date axis
+  const max = Math.max(...series.map((d) => d.total), 1e-9);
+  const slot = HIST_W / HIST_DAYS;
+  const bw = slot * 0.62;
+  const today = series.length - 1;
+
+  const parts = series.map((d, i) => {
+    const h = d.total > 0 ? Math.max(2, (d.total / max) * (HIST_H - PAD_B - 4)) : 1.5;
+    const x = i * slot + (slot - bw) / 2;
+    const y = HIST_H - PAD_B - h;
+    const isToday = i === today;
+    let fill = 'var(--surface-3)';
+    if (d.total > 0) fill = isToday ? 'var(--ok)' : 'oklch(60% 0.12 200)';
+    return `<rect class="hist-bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="${fill}" data-day="${d.day}" data-total="${d.total}" data-x="${(x + bw / 2).toFixed(1)}" data-y="${y.toFixed(1)}"/>`;
   });
-  svg.innerHTML = bars.join('');
+  // First / last date labels only, to avoid clutter.
+  const label = (i, anchor) =>
+    `<text x="${(i * slot + slot / 2).toFixed(1)}" y="${HIST_H - 2}" text-anchor="${anchor}" class="hist-axis">${series[i].day.slice(5)}</text>`;
+  parts.push(label(0, 'start'), label(series.length - 1, 'end'));
+  svg.innerHTML = parts.join('');
 }
+
+// Delegated hover → tooltip. Bound once; bars are re-rendered under it.
+(() => {
+  const svg = $('history');
+  const tip = $('hist-tip');
+  svg.addEventListener('mouseover', (e) => {
+    const bar = e.target.closest('.hist-bar');
+    if (!bar) return;
+    const rect = svg.getBoundingClientRect();
+    tip.innerHTML = `${bar.dataset.day} · <strong>${usd(Number(bar.dataset.total))}</strong>`;
+    tip.style.left = Number(bar.dataset.x) * (rect.width / HIST_W) + 'px';
+    tip.style.top = Number(bar.dataset.y) * (rect.height / HIST_H) + 'px';
+    tip.style.opacity = '1';
+  });
+  svg.addEventListener('mouseleave', () => {
+    tip.style.opacity = '0';
+  });
+})();
+
+let historyCache = [];
+
+async function refreshHistory() {
+  try {
+    const data = await api(`/admin/history?days=${HIST_DAYS}`);
+    historyCache = aggregateHistory(data);
+    drawHistory(historyCache);
+  } catch {
+    /* history is non-critical; leave the last render in place */
+  }
+}
+
+/* ---------- CSV export ---------- */
+
+async function exportCsv() {
+  try {
+    const res = await fetch(`/admin/history.csv?days=90`, {
+      headers: adminKey() ? { 'X-Admin-Key': adminKey() } : {},
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'ai-firewall-spend.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('Spend history exported');
+  } catch (e) {
+    toast('Export failed: ' + e.message, true);
+  }
+}
+
+$('export-csv').addEventListener('click', exportCsv);
 
 /* ---------- rendering ---------- */
 
@@ -122,8 +190,6 @@ function renderFleet(fleet) {
   $('fleet-of').textContent = hasCap ? `of ${usd(fleet.totalLimitUsd)} daily cap` : '· no fleet cap set';
   $('fleet-pending').textContent =
     fleet.totalPendingUsd > 0 ? `(+${usd(fleet.totalPendingUsd)} in-flight)` : '';
-  pushVelocity(fleet.totalSpentUsd);
-  drawSpark();
 }
 
 function renderRow(a) {
@@ -229,6 +295,7 @@ $('form-reset').addEventListener('submit', async () => {
 
 const REFRESH_MS = 2000;
 let timer = null;
+let ticks = 0;
 
 async function tick() {
   const err = $('error');
@@ -237,6 +304,9 @@ async function tick() {
     render(await api('/admin/agents'));
     err.style.display = 'none';
     conn.classList.remove('err');
+    // History changes daily, not per-tick — refresh it on load then ~every 20s.
+    if (ticks % 10 === 0) refreshHistory();
+    ticks++;
   } catch (e) {
     if (e.message === 'unauthorized') {
       err.textContent = 'Locked — admin key required. Reload to try again.';
