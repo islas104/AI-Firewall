@@ -28,7 +28,7 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "dotenv": "^16.4.5",
+    "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "ioredis": "^5.4.1",
     "openai": "^4.67.3",
