@@ -47,7 +47,10 @@ async function recordFailure(redis, surface, ip, metrics, logger) {
   }
 }
 
-const LOCKOUT_BODY = errorBody('Too many failed authentication attempts. Try again in a minute.', 'auth_lockout');
+const LOCKOUT_BODY = errorBody(
+  'Too many failed authentication attempts. Try again in a minute.',
+  'auth_lockout',
+);
 
 /** Bearer auth for the proxy surface (/v1/*). Active when PROXY_API_KEY is set. */
 export function proxyAuth({ config, redis, metrics, logger = console }) {

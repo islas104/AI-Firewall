@@ -30,7 +30,10 @@ const config = {
   logLevel: 'silent',
 };
 
-let redis, server, base, redisUp = true;
+let redis,
+  server,
+  base,
+  redisUp = true;
 
 before(async () => {
   redis = createRedis(REDIS_URL);
@@ -54,7 +57,10 @@ after(async () => {
 });
 
 const skipIfNoRedis = (t) => {
-  if (!redisUp) { t.skip('Redis unavailable — start it with: docker compose up -d redis'); return true; }
+  if (!redisUp) {
+    t.skip('Redis unavailable — start it with: docker compose up -d redis');
+    return true;
+  }
   return false;
 };
 
@@ -78,7 +84,11 @@ test('rejects request without X-Agent-ID (400)', async (t) => {
 
 test('rejects empty messages (400)', async (t) => {
   if (skipIfNoRedis(t)) return;
-  const res = await post('/v1/chat/completions', { model: 'gpt-4o-mini', messages: [] }, { 'X-Agent-ID': agent('a') });
+  const res = await post(
+    '/v1/chat/completions',
+    { model: 'gpt-4o-mini', messages: [] },
+    { 'X-Agent-ID': agent('a') },
+  );
   assert.equal(res.status, 400);
 });
 
@@ -117,11 +127,7 @@ test('reservation blocks a single request that could overshoot (429)', async (t)
   if (skipIfNoRedis(t)) return;
   const id = agent('big');
   // limit $1; ask for a completion whose worst case (500k tokens out) >> $1
-  const res = await post(
-    '/v1/chat/completions',
-    { ...CHAT, max_tokens: 500000 },
-    { 'X-Agent-ID': id },
-  );
+  const res = await post('/v1/chat/completions', { ...CHAT, max_tokens: 500000 }, { 'X-Agent-ID': id });
   assert.equal(res.status, 429);
   const body = await res.json();
   assert.equal(body.error.type, 'budget_contention');

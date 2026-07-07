@@ -15,6 +15,18 @@ function audit(req, action, details) {
   );
 }
 
+/** Parse ?days into 1..max (default 30). */
+function clampDays(raw, max) {
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return Math.min(30, max);
+  return Math.min(n, max);
+}
+
+/** Agent ids are already regex-constrained, but quote defensively for CSV. */
+function csvCell(v) {
+  return /[",\n]/.test(v) ? `"${v.replaceAll('"', '""')}"` : v;
+}
+
 export function adminRouter({ config, budget }) {
   const router = Router();
 
@@ -63,7 +75,12 @@ export function adminRouter({ config, budget }) {
     if (!clearing && (!Number.isFinite(limitUsd) || limitUsd < 0)) {
       return res
         .status(400)
-        .json(errorBody('"limitUsd" must be a non-negative number, or null to clear the override.', 'invalid_request'));
+        .json(
+          errorBody(
+            '"limitUsd" must be a non-negative number, or null to clear the override.',
+            'invalid_request',
+          ),
+        );
     }
     try {
       const status = await budget.setLimit(req.params.agentId, clearing ? null : limitUsd);
@@ -71,6 +88,38 @@ export function adminRouter({ config, budget }) {
       res.json(status);
     } catch (err) {
       console.error('[admin] set limit failed:', err.message);
+      res.status(503).json(errorBody('Budget store unavailable.', 'store_unavailable'));
+    }
+  });
+
+  /** Spend history (JSON) for the last ?days=N (default 30, capped at retention). */
+  router.get('/admin/history', async (req, res) => {
+    const days = clampDays(req.query.days, config.historyRetentionDays);
+    try {
+      const history = await budget.getHistory(days);
+      res.json({ generatedAt: new Date().toISOString(), ...history });
+    } catch (err) {
+      console.error('[admin] history failed:', err.message);
+      res.status(503).json(errorBody('Budget store unavailable.', 'store_unavailable'));
+    }
+  });
+
+  /** Spend history as CSV (agentId,date,spentUsd) for spreadsheets/finance. */
+  router.get('/admin/history.csv', async (req, res) => {
+    const days = clampDays(req.query.days, config.historyRetentionDays);
+    try {
+      const { agents } = await budget.getHistory(days);
+      const rows = ['agentId,date,spentUsd'];
+      for (const a of agents) {
+        for (const [date, amt] of Object.entries(a.byDay)) {
+          rows.push(`${csvCell(a.agentId)},${date},${amt}`);
+        }
+      }
+      res.set('Content-Type', 'text/csv; charset=utf-8');
+      res.set('Content-Disposition', 'attachment; filename="ai-firewall-spend.csv"');
+      res.send(rows.join('\n') + '\n');
+    } catch (err) {
+      console.error('[admin] history.csv failed:', err.message);
       res.status(503).json(errorBody('Budget store unavailable.', 'store_unavailable'));
     }
   });

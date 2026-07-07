@@ -1,0 +1,61 @@
+# Prometheus alerting rules for AI Firewall.
+# Load with a rule_files entry in prometheus.yml and route through Alertmanager.
+groups:
+  - name: ai-firewall
+    rules:
+      # A burst of kill-switch activations means agents are hitting their
+      # ceilings — either a runaway loop (working as intended, but you want to
+      # know) or limits set too low.
+      - alert: BudgetHaltsSpiking
+        expr: increase(budget_halts_total[5m]) > 20
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Agents are being halted frequently"
+          description: "{{ $value }} budget halts in 5m — a runaway agent or limits set too tight."
+
+      # The fleet-wide cap tripping is a bigger deal: ALL agents are now blocked.
+      - alert: GlobalBudgetExhausted
+        expr: increase(global_budget_halts_total[5m]) > 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Fleet-wide daily budget exhausted"
+          description: "The global cap is tripping — every agent is being denied. Raise TOTAL_DAILY_LIMIT_USD or investigate abuse."
+
+      # Upstream errors climbing = OpenAI trouble or a bad key.
+      - alert: UpstreamErrorsHigh
+        expr: increase(upstream_errors_total[5m]) > 10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Elevated upstream (OpenAI) errors"
+          description: "{{ $value }} upstream errors in 5m — check OpenAI status and the API key."
+
+      # Sustained auth failures = credential stuffing / brute force.
+      - alert: AuthFailuresHigh
+        expr: increase(auth_failures_total[5m]) > 50
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "High authentication failure rate"
+          description: "{{ $value }} failed auth attempts in 5m — possible credential stuffing."
+
+      # p95 latency SLO. Chat calls are dominated by OpenAI, so this watches the
+      # proxy's own overhead plus upstream; tune to your models.
+      - alert: HighRequestLatencyP95
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) > 10
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 request latency above 10s"
+          description: "p95 latency is {{ $value }}s over 10m."
+
+      # The proxy is down / not scraping.
+      - alert: ProxyDown
+        expr: up{job="ai-firewall"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "AI Firewall is not being scraped"
+          description: "Prometheus cannot reach the AI Firewall /metrics endpoint."

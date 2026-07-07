@@ -11,7 +11,7 @@
  */
 import { errorBody } from '../errors.js';
 
-function fixedWindowLimiter({ redis, metrics, limitRpm, keyFor, label }) {
+function fixedWindowLimiter({ redis, metrics, limitRpm, keyFor, label, emitHeaders = true }) {
   return async (req, res, next) => {
     const subject = keyFor(req);
     if (!subject) return next();
@@ -20,8 +20,13 @@ function fixedWindowLimiter({ redis, metrics, limitRpm, keyFor, label }) {
     const key = `${label}:ratelimit:${subject}:${minute}`;
     try {
       const [[, count]] = await redis.multi().incr(key).expire(key, 120).exec();
-      res.set('X-RateLimit-Limit', String(limitRpm));
-      res.set('X-RateLimit-Remaining', String(Math.max(0, limitRpm - Number(count))));
+      // The pre-auth per-IP brake stays silent (emitHeaders=false) so an
+      // anonymous 401 caller can't read the throttle threshold to pace an
+      // attack. The post-auth per-agent limiter still advertises its budget.
+      if (emitHeaders) {
+        res.set('X-RateLimit-Limit', String(limitRpm));
+        res.set('X-RateLimit-Remaining', String(Math.max(0, limitRpm - Number(count))));
+      }
       if (Number(count) > limitRpm) {
         metrics?.rateLimited.inc();
         res.set('Retry-After', String(60 - Math.floor((Date.now() / 1000) % 60)));
@@ -68,5 +73,6 @@ export function ipRateLimit({ config, redis, metrics }) {
     limitRpm,
     keyFor: (req) => req.ip,
     label: 'ip',
+    emitHeaders: false,
   });
 }

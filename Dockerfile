@@ -1,5 +1,7 @@
 # AI Agent Budget Proxy
-FROM node:22-alpine
+# Base image digest-pinned for reproducible builds (a re-pull of the floating
+# `22-alpine` tag can otherwise silently change the base). Update deliberately.
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
 
 ENV NODE_ENV=production
 WORKDIR /app

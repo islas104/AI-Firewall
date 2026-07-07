@@ -34,7 +34,8 @@ const baseConfig = {
 
 const CHAT = { model: 'gpt-4o-mini', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] };
 
-let redis, redisUp = true;
+let redis,
+  redisUp = true;
 const servers = [];
 
 function boot(overrides = {}) {
@@ -67,7 +68,10 @@ after(async () => {
 });
 
 const skipIfNoRedis = (t) => {
-  if (!redisUp) { t.skip('Redis unavailable'); return true; }
+  if (!redisUp) {
+    t.skip('Redis unavailable');
+    return true;
+  }
   return false;
 };
 
@@ -181,7 +185,10 @@ test('failed-auth lockout: repeated bad keys get 429, valid key locked out too',
     });
     statuses.push(res.status);
   }
-  assert.ok(statuses.slice(0, 3).every((s) => s === 401), 'first attempts are 401');
+  assert.ok(
+    statuses.slice(0, 3).every((s) => s === 401),
+    'first attempts are 401',
+  );
   assert.ok(statuses.includes(429), `lockout kicks in: ${JSON.stringify(statuses)}`);
   const lockout = await post(base, CHAT, {
     'X-Agent-ID': `${RUN}-brute`,

@@ -128,12 +128,12 @@ export function chatRouter({ config, budget, upstream, metrics }) {
     }
     if (reservation.status === 'halt_global') {
       metrics?.globalBudgetHalts.inc();
-      log.error(
-        `[halt-global] fleet-wide daily budget exhausted — agent=${agentId} rejected`,
-      );
+      log.error(`[halt-global] fleet-wide daily budget exhausted — agent=${agentId} rejected`);
       return res
         .status(402)
-        .json(errorBody('Global daily budget exceeded. All agent execution halted.', 'global_budget_exceeded'));
+        .json(
+          errorBody('Global daily budget exceeded. All agent execution halted.', 'global_budget_exceeded'),
+        );
     }
     if (reservation.status === 'defer') {
       // Committed spend is still under the limit, but in-flight requests have
@@ -166,7 +166,20 @@ export function chatRouter({ config, budget, upstream, metrics }) {
       }
     };
 
-    const ctx = { req, res, config, upstream, release, agentId, model, payload, estimate, limit: reservation.limit, metrics, log };
+    const ctx = {
+      req,
+      res,
+      config,
+      upstream,
+      release,
+      agentId,
+      model,
+      payload,
+      estimate,
+      limit: reservation.limit,
+      metrics,
+      log,
+    };
     return payload.stream ? handleStream(ctx) : handleBlocking(ctx);
   });
 
@@ -177,7 +190,18 @@ export function chatRouter({ config, budget, upstream, metrics }) {
 // Non-streaming path
 // ---------------------------------------------------------------------------
 
-async function handleBlocking({ res, config, upstream, release, agentId, model, payload, limit, metrics, log }) {
+async function handleBlocking({
+  res,
+  config,
+  upstream,
+  release,
+  agentId,
+  model,
+  payload,
+  limit,
+  metrics,
+  log,
+}) {
   let completion;
   try {
     completion = await upstream.chat(payload);
@@ -202,7 +226,20 @@ async function handleBlocking({ res, config, upstream, release, agentId, model, 
 // Streaming path (SSE passthrough with usage capture)
 // ---------------------------------------------------------------------------
 
-async function handleStream({ req, res, config, upstream, release, agentId, model, payload, estimate, limit, metrics, log }) {
+async function handleStream({
+  req,
+  res,
+  config,
+  upstream,
+  release,
+  agentId,
+  model,
+  payload,
+  estimate,
+  limit,
+  metrics,
+  log,
+}) {
   let stream;
   try {
     stream = await upstream.chatStream(payload);
@@ -277,11 +314,16 @@ function setBudgetHeaders(res, cost, newTotal, limit) {
 function classifyUpstreamError(err) {
   const status = Number.isInteger(err?.status) ? err.status : 502;
   if (status === 401 || status === 403) {
-    return { status: 502, clientMessage: 'Upstream authentication error. The proxy operator has been notified.' };
+    return {
+      status: 502,
+      clientMessage: 'Upstream authentication error. The proxy operator has been notified.',
+    };
   }
   const raw = err?.error?.message ?? err?.message ?? 'Upstream request failed.';
   // Bound the relayed message and strip anything key-shaped defensively.
-  const clientMessage = String(raw).slice(0, 300).replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***');
+  const clientMessage = String(raw)
+    .slice(0, 300)
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***');
   return { status, clientMessage };
 }
 

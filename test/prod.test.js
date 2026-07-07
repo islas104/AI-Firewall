@@ -30,7 +30,8 @@ const baseConfig = {
 
 const CHAT = { model: 'gpt-4o-mini', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] };
 
-let redis, redisUp = true;
+let redis,
+  redisUp = true;
 const servers = [];
 
 function boot(configOverrides = {}) {
@@ -63,7 +64,10 @@ after(async () => {
 });
 
 const skipIfNoRedis = (t) => {
-  if (!redisUp) { t.skip('Redis unavailable'); return true; }
+  if (!redisUp) {
+    t.skip('Redis unavailable');
+    return true;
+  }
   return false;
 };
 
@@ -157,7 +161,11 @@ test('/metrics is protected when ADMIN_API_KEY is set', async (t) => {
 test('oversized body → 413, not a crash', async (t) => {
   if (skipIfNoRedis(t)) return;
   const base = boot();
-  const res = await post(base, { ...CHAT, messages: [{ role: 'user', content: 'x'.repeat(3 * 1024 * 1024) }] }, { 'X-Agent-ID': `${RUN}-big` });
+  const res = await post(
+    base,
+    { ...CHAT, messages: [{ role: 'user', content: 'x'.repeat(3 * 1024 * 1024) }] },
+    { 'X-Agent-ID': `${RUN}-big` },
+  );
   assert.equal(res.status, 413);
   assert.equal((await res.json()).error.type, 'payload_too_large');
 });

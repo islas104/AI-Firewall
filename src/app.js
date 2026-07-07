@@ -42,7 +42,7 @@ export function createApp({ config, redis, budget, upstream, logger, metrics }) 
   app.use(express.json({ limit: '2mb' }));
 
   // Public surfaces
-  app.use(healthRouter({ config, redis }));
+  app.use(healthRouter({ redis }));
   app.get('/dashboard', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'dashboard.html')));
   app.get('/dashboard.js', (_req, res) => res.sendFile(path.join(PUBLIC_DIR, 'dashboard.js')));
 
@@ -82,7 +82,7 @@ export function createApp({ config, redis, budget, upstream, logger, metrics }) 
   app.use((_req, res) => res.status(404).json(errorBody('Not found.', 'not_found')));
 
   // Last-resort error handler — malformed JSON bodies land here too.
-  // eslint-disable-next-line no-unused-vars
+
   app.use((err, req, res, _next) => {
     if (err?.type === 'entity.parse.failed') {
       return res.status(400).json(errorBody('Request body is not valid JSON.', 'invalid_json'));

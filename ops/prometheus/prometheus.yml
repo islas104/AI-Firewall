@@ -1,0 +1,28 @@
+# Minimal Prometheus config to scrape AI Firewall.
+# The /metrics endpoint is admin-gated, so pass the admin key as a Bearer-style
+# header. Store the real key in a file and reference it — don't inline secrets.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: ai-firewall
+    metrics_path: /metrics
+    scheme: https
+    static_configs:
+      - targets: ["proxy-production-605f.up.railway.app"]
+    # /metrics requires the admin key in the X-Admin-Key header. Prometheus
+    # sends configured headers on every scrape:
+    # (Prometheus >= 2.26 supports `authorization` + custom headers via
+    #  `http_headers` — shown here; adjust to your version.)
+    # http_headers:
+    #   X-Admin-Key:
+    #     values: ["<ADMIN_API_KEY>"]
+
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]

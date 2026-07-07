@@ -26,7 +26,7 @@ export function securityHeaders(config) {
       'Cache-Control': 'no-store',
     });
     if (config.enableHsts) {
-      res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
     }
     next();
   };

@@ -10,7 +10,10 @@ const $ = (id) => document.getElementById(id);
 const usd = (n) => '$' + Number(n).toFixed(4);
 
 function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+  );
 }
 
 function toast(message, isError = false) {
@@ -71,9 +74,14 @@ function pushVelocity(total) {
 
 function drawSpark() {
   const svg = $('spark');
-  const W = 180, H = 52, PAD = 2;
+  const W = 180,
+    H = 52,
+    PAD = 2;
   const n = history.length;
-  if (!n) { svg.innerHTML = ''; return; }
+  if (!n) {
+    svg.innerHTML = '';
+    return;
+  }
   const max = Math.max(...history, 1e-9);
   const bw = Math.max(2, (W - PAD * 2) / 48 - 1.5);
   const bars = history.map((v, i) => {
@@ -95,8 +103,10 @@ function statusOf(a) {
 
 const BAR_COLORS = { halted: 'var(--danger)', warn: 'var(--warn)', ok: 'var(--ok)' };
 
-const ICON_LIMIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>';
-const ICON_RESET = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>';
+const ICON_LIMIT =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>';
+const ICON_RESET =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>';
 
 function renderFleet(fleet) {
   if (!fleet) return;
@@ -110,7 +120,8 @@ function renderFleet(fleet) {
   fill.style.background = color;
   $('fleet-spent').textContent = usd(fleet.totalSpentUsd);
   $('fleet-of').textContent = hasCap ? `of ${usd(fleet.totalLimitUsd)} daily cap` : '· no fleet cap set';
-  $('fleet-pending').textContent = fleet.totalPendingUsd > 0 ? `(+${usd(fleet.totalPendingUsd)} in-flight)` : '';
+  $('fleet-pending').textContent =
+    fleet.totalPendingUsd > 0 ? `(+${usd(fleet.totalPendingUsd)} in-flight)` : '';
   pushVelocity(fleet.totalSpentUsd);
   drawSpark();
 }
@@ -193,7 +204,11 @@ $('form-limit').addEventListener('submit', async () => {
       method: 'PUT',
       body: JSON.stringify({ limitUsd }),
     });
-    toast(limitUsd === null ? `Override cleared for ${pendingAgent}` : `${pendingAgent} limited to ${usd(limitUsd)}/day`);
+    toast(
+      limitUsd === null
+        ? `Override cleared for ${pendingAgent}`
+        : `${pendingAgent} limited to ${usd(limitUsd)}/day`,
+    );
     tick();
   } catch (err) {
     toast(`Failed to set limit: ${err.message}`, true);
@@ -247,7 +262,10 @@ function stopPolling() {
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) stopPolling();
-  else { tick(); startPolling(); }
+  else {
+    tick();
+    startPolling();
+  }
 });
 
 await tick();

@@ -24,7 +24,9 @@ export const config = Object.freeze({
   // Optional closed set of permitted agent IDs (comma-separated). When set,
   // unknown agents get 403 before touching any budget.
   agentAllowlist: process.env.AGENT_ALLOWLIST
-    ? process.env.AGENT_ALLOWLIST.split(',').map((s) => s.trim()).filter(Boolean)
+    ? process.env.AGENT_ALLOWLIST.split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
     : null,
 
   // Request rate limiting (requests/minute; 0 disables)
@@ -81,6 +83,9 @@ export const config = Object.freeze({
   // crashes mid-flight and never commits.
   spentKeyTtlSeconds: 48 * HOURS,
   pendingKeyTtlSeconds: 600,
+
+  // How long per-agent spend history is retained for /admin/history export.
+  historyRetentionDays: Number(process.env.HISTORY_RETENTION_DAYS ?? 90),
 });
 
 export function validateConfig() {
