@@ -143,7 +143,8 @@ Every `POST /v1/chat/completions` request goes through this lifecycle:
    Exceeding it returns `429 rate_limited`. This stops fast loops of *cheap*
    calls before they matter.
 3. **Estimate** — the worst-case cost of the request is estimated:
-   `prompt_chars / 4` input tokens + `max_tokens` (or a default of 1024)
+   `prompt_chars / 3` input tokens (conservative; image blocks charged a token
+   floor) + `max_tokens` (or a default of 4096)
    output tokens, priced from the model pricing table.
 4. **Reserve (atomic)** — a Redis Lua script atomically checks and reserves
    that estimate against the agent's daily budget. Because this happens
@@ -433,13 +434,17 @@ Error responses:
 
 | Status | `error.type` | Meaning | What your agent should do |
 |---|---|---|---|
-| `402` | — (fixed body: `{"error": "Budget exceeded. Agent execution halted."}`) | Daily budget exhausted. **Terminal for the day.** | Stop. Retrying is pointless until UTC midnight or an admin reset. |
-| `429` | `rate_limited` | Too many requests/minute for this agent. | Back off; see `Retry-After`. |
+| `402` | — (fixed body: `{"error": "Budget exceeded. Agent execution halted."}`) | The agent's daily budget is exhausted. **Terminal for the day.** | Stop. Retrying is pointless until UTC midnight or an admin reset. |
+| `402` | `global_budget_exceeded` | The **fleet-wide** daily cap is exhausted (all agents combined). | Stop; the whole fleet is halted until reset/midnight. |
+| `429` | `rate_limited` | Too many requests/minute for this agent (or IP). | Back off; see `Retry-After`. |
 | `429` | `budget_contention` | Budget remains, but concurrent in-flight requests have reserved it. | Retry in a few seconds. |
-| `400` | `missing_agent_id` / `invalid_agent_id` / `invalid_request` / `invalid_json` | Malformed request. | Fix the request. |
+| `429` | `auth_lockout` | Too many failed auth attempts from this IP. | Back off 60s; check your key. |
+| `400` | `missing_agent_id` / `invalid_agent_id` / `invalid_request` / `invalid_json` | Malformed request (bad/missing agent id, empty messages, non-object message, out-of-range `max_tokens`). | Fix the request. |
+| `400` | `unknown_model` | The model has no configured pricing and can't be metered (fail-closed). | Use a priced model or add it to `MODEL_PRICING`. |
 | `401` | `unauthorized` | Missing/wrong proxy key. | Fix credentials. |
+| `403` | `agent_not_allowed` | `AGENT_ALLOWLIST` is set and this agent isn't on it. | Use an allowlisted agent id. |
 | `413` | `payload_too_large` | Body over 2 MB. | Shrink the payload. |
-| `502`/passthrough | `upstream_error` | OpenAI itself failed; original status and message preserved. | Handle as you would a direct OpenAI error. |
+| `502`/passthrough | `upstream_error` | OpenAI itself failed. Auth/permission errors are replaced with a generic message; others pass through. | Handle as you would a direct OpenAI error. |
 | `503` | `store_unavailable` | Redis down — fail-closed, nothing forwarded. | Retry with backoff; page whoever runs the proxy. |
 
 #### `GET /v1/budget/:agentId`
@@ -465,17 +470,24 @@ Current budget status for one agent:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/admin/agents` | Fleet overview: every agent seen today with spend/limit/status. |
+| `GET` | `/admin/agents` | Fleet overview: every agent seen today with spend/limit/status, plus a `fleet` block (global cap + total spend). |
 | `GET` | `/admin/agents/:id` | One agent's status. |
 | `PUT` | `/admin/agents/:id/limit` | Set a per-agent daily limit: body `{"limitUsd": 25}`. Clear the override with `{"limitUsd": null}` (falls back to the global limit). Overrides persist across days. |
 | `DELETE` | `/admin/agents/:id/spend` | Reset today's spend to $0 — un-trips the kill-switch immediately. |
+| `GET` | `/admin/history?days=N` | Per-agent spend history (JSON) for the last `N` days (default 30, capped at `HISTORY_RETENTION_DAYS`). Survives the 48 h daily-key TTL. |
+| `GET` | `/admin/history.csv?days=N` | The same history as a CSV download (`agentId,date,spentUsd`) for finance/spreadsheets. |
 | `GET` | `/metrics` | Prometheus metrics. |
+
+Every state-changing admin action (limit set, spend reset) is written to a
+structured audit log line (`audit: true`, actor IP, action, target). All
+`:agentId` routes reject the reserved `__global__` ledger id and malformed ids
+with `400`.
 
 ### Public
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/healthz` | Liveness — verifies Redis, reports upstream mode and global limit. |
+| `GET` | `/healthz` | Liveness — verifies Redis. Intentionally minimal body (`{"status":"ok"}`), discloses no config. |
 | `GET` | `/dashboard` | The live control-room UI. |
 
 ---
@@ -488,12 +500,19 @@ Current budget status for one agent:
 If an admin key is configured it prompts once and remembers it in
 `localStorage`.
 
+It shows a **fleet budget meter** (total spend vs the global cap), a **14-day
+spend-history chart** with hover tooltips, and an **Export CSV** button that
+downloads the full spend history for finance.
+
 For each agent seen today: status pill (**ACTIVE** / **NEAR LIMIT** at >80% /
-**HALTED**), spent today, a budget bar, its limit (`*` marks a per-agent
+**HALTED**), spent today, a budget bar, its limit (`override` marks a per-agent
 override), in-flight reservations, and two actions:
 
 - **limit** — set or clear a per-agent daily limit
 - **reset** — wipe today's spend (un-trips the kill-switch)
+
+Built as vanilla JavaScript under a strict CSP (no inline script); admin
+actions use native dialogs and toast feedback.
 
 ---
 
@@ -520,10 +539,13 @@ All configuration is environment variables, read once at boot and validated
 | `UPSTREAM_TIMEOUT_MS` | `60000` | Timeout per OpenAI request. |
 | `UPSTREAM_MAX_RETRIES` | `1` | OpenAI SDK retry count. |
 | `MODEL_PRICING` | built-in table | JSON overriding prices: `{"gpt-4o-mini":{"input":0.0015,"output":0.002}}` — USD per 1,000 tokens. |
-| `DEFAULT_COMPLETION_ESTIMATE` | `1024` | Output-token estimate used for reservation when a request has no `max_tokens`. |
+| `REJECT_UNKNOWN_MODELS` | `true` | Reject (`400 unknown_model`) any model with no pricing entry instead of billing it at the DEFAULT tier — stops an expensive model being under-recorded past the ceiling. |
+| `MAX_TOKENS_CEILING` | `32000` | Hard cap on client-supplied `max_tokens`, bounding a single reservation so one caller can't park the whole fleet budget. |
+| `DEFAULT_COMPLETION_ESTIMATE` | `4096` | Output-token estimate used for reservation when a request has no `max_tokens`. |
+| `HISTORY_RETENTION_DAYS` | `90` | How long per-agent spend history is kept for `/admin/history` export. |
 | `LOG_LEVEL` | `info` | pino level: `debug`, `info`, `warn`, `error`, `silent`. |
 | `TRUST_PROXY` | `0` | Number of trusted reverse-proxy hops. **Railway needs `2`** (edge + internal LB) — verify by checking that logged client IPs are real, not `152.233.x.x` edge IPs. |
-| `ENABLE_HSTS` | `false` | Send HSTS header. Only enable behind TLS. |
+| `ENABLE_HSTS` | `false` | Send HSTS header (with `preload`). Only enable behind TLS. |
 
 **Pricing note:** built-in rates are the project's baseline spec values and are
 deliberately conservative for gpt-4o-mini (the meter over-counts, so agents
@@ -552,12 +574,18 @@ invoice exactly, set `MODEL_PRICING` to the current official rates.
   the characters actually streamed.
 - **Keys layout in Redis:**
   ```
-  agent:budget:spent:{agentId}:{YYYY-MM-DD}    committed spend   (TTL 48h)
-  agent:budget:pending:{agentId}:{YYYY-MM-DD}  in-flight reserve (TTL 10m)
+  agent:budget:spent:{agentId}:{YYYY-MM-DD}    committed spend    (TTL 48h)
+  agent:budget:pending:{agentId}:{YYYY-MM-DD}  in-flight reserve  (TTL 10m)
   agent:budget:limit:{agentId}                 per-agent override (persistent)
-  agent:budget:agents:{YYYY-MM-DD}             agents seen today (TTL 48h)
-  agent:ratelimit:{agentId}:{epochMinute}      rate-limit window (TTL 120s)
+  agent:budget:agents:{YYYY-MM-DD}             agents seen today  (TTL 48h)
+  agent:budget:history:{agentId}               per-day history    (TTL 90d)
+  agent:budget:roster                          all-time spenders  (for export)
+  agent:ratelimit:{agentId}:{epochMinute}      per-agent RPM window (TTL 120s)
+  ip:ratelimit:{ip}:{epochMinute}              per-IP RPM window   (TTL 120s)
+  authfail:{surface}:{ip}:{epochMinute}        failed-auth counter (TTL 120s)
   ```
+  The `__global__` agent id holds the fleet-wide ledger; it is unaddressable
+  from the API (the id regex requires an alphanumeric first character).
 - **Defense in depth against a leaked proxy key.** Budgets are keyed on the
   client-chosen `X-Agent-ID`, so a leaked key could otherwise mint fresh IDs
   with fresh budgets. Three independent layers close this: the **fleet-wide
@@ -586,13 +614,19 @@ headers are redacted before writing.
 | `http_requests_total{method,route,status}` | Traffic by route/status |
 | `http_request_duration_seconds` | Latency histogram |
 | `agent_spend_usd_total` | Total metered spend |
-| `budget_halts_total` | Kill-switch activations (**alert on spikes**) |
+| `budget_halts_total` | Per-agent kill-switch activations (**alert on spikes**) |
+| `global_budget_halts_total` | Fleet-wide cap activations (**page on any**) |
 | `budget_contention_total` | 429s from reservation contention |
 | `rate_limited_total` | 429s from the rate limiter |
+| `auth_failures_total` | Failed auth attempts (brute-force signal) |
 | `upstream_errors_total` | Failed OpenAI calls |
 
 Scrape config needs the header: `Authorization` is unused; set
 `X-Admin-Key` via Prometheus `http_headers` / your agent's custom headers.
+
+Ready-to-use configs live in [`ops/`](ops/): Prometheus scrape config
+(`ops/prometheus/prometheus.yml`), alert rules (`ops/prometheus/alerts.yml`),
+and a Grafana dashboard (`ops/grafana/dashboard.json`).
 
 ---
 
@@ -603,9 +637,10 @@ docker compose up -d redis   # integration tests need Redis (they use DBs 13-15)
 npm test
 ```
 
-33 tests across four suites:
+52 tests across five suites:
 
-- **Unit** — pricing math, estimation, config merging.
+- **Unit** — pricing math, estimation, config merging, prototype-safe model
+  lookup, negative/NaN cost clamps.
 - **Integration** — real Express + real Redis + mock upstream: metering,
   kill-switch exact body, reservation guard, **a 40-request concurrent burst
   proving the per-agent ceiling holds**, streaming metering, admin flows,
@@ -614,9 +649,15 @@ npm test
   rate limiting, metrics auth, oversized bodies.
 - **Security round 2** — **an agent-ID rotation attack proving the fleet-wide
   cap holds**, allowlist enforcement, per-IP throttling, failed-auth lockout.
+- **Pen-test regressions** (`test/pentest.test.js`) — one test per confirmed
+  vulnerability from the [security review](SECURITY.md): negative `max_tokens`
+  ledger corruption, unknown-model billing bypass, prototype-collision crash,
+  reservation-parking DoS, `messages:[null]` hang, `__global__` ledger access.
 
-CI (GitHub Actions) runs the suite against a Redis service container, then
-builds the Docker image and smoke-tests a real container end-to-end.
+CI (GitHub Actions) runs lint + the full suite against a Redis service
+container, an `npm audit` gate, then builds the Docker image and smoke-tests a
+real container end-to-end. See [SECURITY.md](SECURITY.md) for the full threat
+model and pen-test findings.
 
 ---
 
@@ -650,17 +691,21 @@ builds the Docker image and smoke-tests a real container end-to-end.
 │   ├── metrics.js            # Prometheus registry + timing middleware
 │   ├── errors.js             # OpenAI-style error envelope
 │   ├── middleware/
-│   │   ├── auth.js           # Proxy + admin auth (constant-time)
+│   │   ├── auth.js           # Proxy + admin auth (constant-time, lockout)
 │   │   ├── security.js       # CSP + security headers
-│   │   └── rateLimit.js      # Per-agent requests/minute (Redis)
+│   │   └── rateLimit.js      # Per-agent + per-IP requests/minute (Redis)
 │   └── routes/
-│       ├── chat.js           # The proxy: reserve → forward → commit, SSE
-│       ├── admin.js          # Fleet, limits, resets
+│       ├── chat.js           # The proxy: validate → reserve → forward → commit, SSE
+│       ├── admin.js          # Fleet, limits, resets, spend history + CSV export
 │       └── health.js         # /healthz
-├── public/                   # Dashboard (CSP-safe external JS)
-├── test/                     # node:test — unit, integration, prod hardening
-├── .github/workflows/ci.yml  # Tests vs Redis service + Docker smoke test
-├── Dockerfile                # node:22-alpine, non-root, healthcheck
+├── public/                   # Dashboard (CSP-safe external JS, history chart)
+├── test/                     # node:test — unit, integration, hardening, pen-test regressions
+├── ops/                      # Prometheus scrape/alerts + Grafana dashboard
+├── SECURITY.md               # Threat model + pen-test findings & fixes
+├── .github/
+│   ├── workflows/ci.yml      # Lint + tests vs Redis + npm audit + Docker smoke test
+│   └── dependabot.yml        # Weekly dependency updates
+├── Dockerfile                # node:22-alpine (digest-pinned), non-root, healthcheck
 ├── docker-compose.yml        # redis (loopback-only) + proxy
 └── railway.json              # Railway build/deploy config
 ```
@@ -679,7 +724,10 @@ a safety tool:
 | Safety brake, not a billing ledger | 6-dp rounding, conservative estimates; totals are enforcement-grade, not invoice-grade | Reconciliation report against the OpenAI usage API |
 | Daily granularity | UTC calendar days only | Weekly / monthly rolling windows |
 | Single proxy key | One `PROXY_API_KEY` for all agents | Per-agent keys with scoped budgets |
-| No persistence of history | Spend keys expire after 48 h by design | Optional export to a time-series store |
+
+Spend history **is** persisted (`HISTORY_RETENTION_DAYS`, default 90) and
+exportable via `/admin/history` / `/admin/history.csv` — the daily enforcement
+keys still expire after 48 h, but the history survives for reporting.
 
 ## Author
 
